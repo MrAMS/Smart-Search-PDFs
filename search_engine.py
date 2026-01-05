@@ -15,6 +15,30 @@ import numpy as np
 from typing import List, Tuple, Optional, Dict, Any
 
 
+def get_adaptive_length_penalty(chunk_types):
+    """
+    根据chunk类型返回最佳长度惩罚参数
+
+    Args:
+        chunk_types: set of chunk types in corpus
+
+    Returns:
+        float: 推荐的length_penalty_exp值
+    """
+    penalty_map = {
+        "page": 0.3,        # 当前最佳值
+        "paragraph": 0.2,   # 段落较短，减轻惩罚
+        "fixed": 0.35       # 长度均匀，略增惩罚
+    }
+
+    if len(chunk_types) == 1:
+        # 单一粒度，使用优化参数
+        return penalty_map.get(list(chunk_types)[0], 0.3)
+    else:
+        # 混合粒度，使用中间值
+        return 0.3
+
+
 class EmbeddingSearcher:
     """
     优化的 Embedding 搜索引擎
@@ -93,7 +117,7 @@ class EmbeddingSearcher:
         query: str,
         corpus: List[Dict[str, Any]],
         max_results: int = 50,
-        length_penalty_exp: float = 0.3,  # 默认 0.3（而非 0.5）
+        length_penalty_exp: float = None,  # 改为可选，支持自动检测
         return_details: bool = False
     ) -> List[Tuple[int, float, ...]]:
         """
@@ -104,6 +128,7 @@ class EmbeddingSearcher:
             corpus: 文档语料库（包含 'embedding' 和 'text' 字段）
             max_results: 返回的最大结果数
             length_penalty_exp: 长度惩罚指数（0 = 无惩罚，越大惩罚越重）
+                              如果为 None，自动根据corpus中的chunk类型选择
             return_details: 是否返回详细信息（余弦相似度、文本长度等）
 
         Returns:
@@ -114,11 +139,21 @@ class EmbeddingSearcher:
 
         算法流程：
             1. 获取并归一化查询向量（带缓存）
-            2. 单次遍历计算所有文档的最终分数
-            3. 单次排序并返回 top-k 结果
+            2. 自动检测粒度并选择最佳长度惩罚参数（如果未指定）
+            3. 单次遍历计算所有文档的最终分数
+            4. 单次排序并返回 top-k 结果
         """
         # 获取归一化的查询向量
         query_emb = self.get_query_embedding(query)
+
+        # 自动检测粒度（如果未指定length_penalty_exp）
+        if length_penalty_exp is None:
+            chunk_types = set(
+                doc.get('chunk_type', 'page')
+                for doc in corpus
+                if 'embedding' in doc
+            )
+            length_penalty_exp = get_adaptive_length_penalty(chunk_types)
 
         # 单次遍历计算最终分数
         doc_scores = []

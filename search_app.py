@@ -39,9 +39,12 @@ from PyQt5.QtWidgets import (
     QDialogButtonBox,
     QMessageBox,
     QAbstractItemView,
-    QSplitter
+    QSplitter,
+    QFrame,
+    QGroupBox,
+    QSizePolicy
 )
-from PyQt5.QtGui import QPixmap, QFont, QColor, QKeySequence
+from PyQt5.QtGui import QPixmap, QFont, QColor, QKeySequence, QFontMetrics
 from PyQt5.QtCore import Qt, QRectF, QTimer
 import fitz  # PyMuPDF
 import unicodedata
@@ -95,7 +98,7 @@ def init_embedding_model(log_callback=None):
     # 如果已经初始化，直接返回
     if GLOBAL_EMBED_MODEL is not None:
         if log_callback:
-            log_callback("✅ Embedding 模型已加载，无需重新初始化")
+            log_callback("Embedding 模型已加载，无需重新初始化")
         return True
 
     # 检查 fastembed 是否可用
@@ -113,10 +116,10 @@ def init_embedding_model(log_callback=None):
         model_cache_path = os.path.join(cache_dir, model_name.replace("/", "--"))
         if os.path.exists(model_cache_path):
             if log_callback:
-                log_callback(f"✅ 使用缓存的模型: {model_name}")
+                log_callback(f"使用缓存的模型: {model_name}")
         else:
             if log_callback:
-                log_callback(f"⏬ 首次使用，下载模型: {model_name}")
+                log_callback(f"首次使用，下载模型: {model_name}")
                 log_callback("   这可能需要几分钟，请耐心等待...")
 
         if log_callback:
@@ -125,7 +128,7 @@ def init_embedding_model(log_callback=None):
         GLOBAL_EMBED_MODEL = TextEmbedding(model_name=model_name, cache_dir=cache_dir)
 
         if log_callback:
-            log_callback("✅ Embedding 模型加载成功 (768维, 8192 token)")
+            log_callback("Embedding 模型加载成功 (768维, 8192 token)")
             log_callback("   模型已缓存，下次运行将直接使用")
         return True
 
@@ -238,9 +241,9 @@ def load_corpus_and_initialize_bm25(folders_list):
     # 验证 embedding 质量
     valid_count, issues = validate_corpus_embeddings(GLOBAL_CORPUS)
     if valid_count > 0:
-        print(f"✅ 加载了 {valid_count} 个文档的 embeddings")
+        print(f"加载了 {valid_count} 个文档的 embeddings")
         if issues:
-            print(f"⚠️  发现 {len(issues)} 个质量问题:")
+            print(f"发现 {len(issues)} 个质量问题:")
             for issue in issues[:10]:  # 只显示前10个
                 print(f"   {issue}")
             if len(issues) > 10:
@@ -428,6 +431,173 @@ def parse_simple_search_query(query_str):
         elif word:
             unquoted_words.append(word)
     return quoted_phrases, unquoted_words
+
+
+###############################################################################
+# Custom Result Display Widget
+###############################################################################
+class ResultWidget(QWidget):
+    """
+    自定义搜索结果显示Widget
+    使用原生Qt控件替代HTML，提供更好的灵活性和交互性
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.init_ui()
+
+    def init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # --- 顶部信息栏 ---
+        header_frame = QFrame()
+        header_frame.setStyleSheet("""
+            QFrame {
+                background-color: #007bff;
+                border-radius: 4px 4px 0px 0px;
+            }
+        """)
+        header_layout = QHBoxLayout(header_frame)
+        header_layout.setContentsMargins(8, 4, 8, 4)
+        header_layout.setSpacing(10)
+
+        self.result_number_label = QLabel("结果 1 / 1")
+        self.result_number_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 11px;
+                font-weight: bold;
+            }
+        """)
+        header_layout.addWidget(self.result_number_label)
+
+        # 文件名标签 - 支持省略号截断
+        self.filename_label = QLabel("文件名")
+        self.filename_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 11px;
+            }
+        """)
+        self.filename_label.setTextFormat(Qt.PlainText)
+        self.filename_label.setWordWrap(False)
+        # 设置大小策略允许文本被截断
+        self.filename_label.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Preferred
+        )
+        header_layout.addWidget(self.filename_label, 1)  # 给予伸缩因子
+
+        main_layout.addWidget(header_frame)
+
+        # --- 元数据行（独立显示）---
+        self.metadata_label = QLabel()
+        self.metadata_label.setTextFormat(Qt.RichText)
+        self.metadata_label.setWordWrap(True)
+        self.metadata_label.setStyleSheet("""
+            QLabel {
+                background-color: #e8f4f8;
+                padding: 8px 10px;
+                border-left: 1px solid #dee2e6;
+                border-right: 1px solid #dee2e6;
+                border-bottom: 1px solid #b3e5fc;
+                font-size: 11px;
+            }
+        """)
+        main_layout.addWidget(self.metadata_label)
+
+        # --- 文本内容区域 ---
+        content_frame = QFrame()
+        content_frame.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border: 1px solid #dee2e6;
+                border-radius: 0px 0px 4px 4px;
+            }
+        """)
+        content_layout = QVBoxLayout(content_frame)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+
+        self.content_display = QTextEdit()
+        self.content_display.setReadOnly(True)
+        self.content_display.setStyleSheet("""
+            QTextEdit {
+                border: none;
+                background-color: transparent;
+                font-size: 12px;
+                line-height: 1.4;
+            }
+        """)
+        self.content_display.setMinimumHeight(100)
+        self.content_display.setMaximumHeight(200)
+        content_layout.addWidget(self.content_display)
+
+        main_layout.addWidget(content_frame)
+
+    def update_result(self, result_num, total_results, filename, page_num,
+                     granularity, chunk_index, score, tags=None, highlighted_text=""):
+        """
+        更新显示的结果信息（HTML简化版）
+
+        Args:
+            result_num: 当前结果序号（从1开始）
+            total_results: 总结果数
+            filename: 文件名
+            page_num: 页码
+            granularity: 粒度类型
+            chunk_index: chunk序号
+            score: 相关度分数
+            tags: 匹配标签列表 [(tag_text, color), ...]
+            highlighted_text: 高亮的文本内容（HTML格式）
+        """
+        # 更新顶部栏
+        self.result_number_label.setText(f"结果 {result_num}/{total_results}")
+
+        # 文件名处理：使用省略号并设置工具提示
+        font_metrics = QFontMetrics(self.filename_label.font())
+        available_width = self.filename_label.width() - 20  # 预留一些边距
+
+        # 如果文件名太长，手动添加省略号
+        if font_metrics.horizontalAdvance(filename) > available_width and available_width > 0:
+            elided_text = font_metrics.elidedText(filename, Qt.ElideMiddle, available_width)
+            self.filename_label.setText(elided_text)
+        else:
+            self.filename_label.setText(filename)
+
+        # 设置工具提示显示完整文件名
+        self.filename_label.setToolTip(filename)
+
+        # 生成匹配标签的HTML
+        tags_html = ""
+        if tags:
+            tag_badges = []
+            for tag_text, color in tags:
+                tag_badges.append(
+                    f'<span style="background-color: {color}; color: white; '
+                    f'padding: 3px 8px; border-radius: 3px; margin-right: 4px; '
+                    f'font-size: 10px; font-weight: bold;">{tag_text}</span>'
+                )
+            tags_html = ''.join(tag_badges)
+
+        # 生成元数据行HTML（独立显示）
+        metadata_html = f'''
+        <span style="color: #01579b; font-weight: bold; margin-right: 12px;">页码: {page_num}</span>
+        <span style="color: #0277bd; font-weight: bold; margin-right: 12px;">粒度: {granularity}</span>
+        <span style="color: #0277bd; font-weight: bold; margin-right: 12px;">Chunk: #{chunk_index}</span>
+        {f'<span style="margin-right: 8px;">{tags_html}</span>' if tags_html else ''}
+        <span style="color: #c62828; font-weight: bold; font-family: Courier New, monospace;">相关度: {score:.4f}</span>
+        '''
+        self.metadata_label.setText(metadata_html)
+
+        # 生成文本内容HTML
+        content_html = f'''
+        <div style="font-family: Arial, sans-serif; padding: 10px; line-height: 1.6;">
+            {highlighted_text}
+        </div>
+        '''
+        self.content_display.setHtml(content_html)
 
 
 ###############################################################################
@@ -692,7 +862,7 @@ class FoldersDialog(QDialog):
 class SearchApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Search Interface with PDF Viewer")
+        self.setWindowTitle("PDF 智能搜索系统 - 混合搜索引擎")
         self.current_result_index = 0
         self.results = []
         # We'll keep a dynamic list of words to highlight in the PDF
@@ -711,7 +881,7 @@ class SearchApp(QMainWindow):
         loaded_data = load_folders_database()
         if loaded_data is None:
             # None => "folders.ini" not found
-            self.result_display.setText("Folder database not initialized")
+            self.status_display.setText("Folder database not initialized")
             FOLDERS_DB = []
         else:
             FOLDERS_DB = loaded_data
@@ -721,18 +891,18 @@ class SearchApp(QMainWindow):
             errors, status = load_corpus_and_initialize_bm25(FOLDERS_DB)
             # Show any error messages (e.g. missing folders)
             for err in errors:
-                self.result_display.append(err)
-            self.result_display.append(status)
+                self.status_display.append(err)
+            self.status_display.append(status)
         # If FOLDERS_DB is empty and not None, it means folders.ini was present but invalid or empty
         if FOLDERS_DB == [] and loaded_data is not None:
-            self.result_display.setText("No folders in database. Please add some folders.")
+            self.status_display.setText("No folders in database. Please add some folders.")
 
         # Check if we actually loaded any embeddings
         self.embeddings_present = any(('embedding' in doc) for doc in GLOBAL_CORPUS)
 
         # Attempt to initialize the global embedding model if we have embeddings
         if self.embeddings_present:
-            success = init_embedding_model(lambda msg: self.result_display.append(msg))
+            success = init_embedding_model(lambda msg: self.status_display.append(msg))
             if success:
                 # ← added: 初始化优化的搜索引擎
                 self.search_engine = SearchEngine(
@@ -741,36 +911,88 @@ class SearchApp(QMainWindow):
                     embed_model=GLOBAL_EMBED_MODEL
                 )
                 if GLOBAL_BM25_MODEL is not None:
-                    self.result_display.append("Corpus and Embeddings loaded successfully. Ready to search.")
+                    self.status_display.append("Corpus and Embeddings loaded successfully. Ready to search.")
                 else:
-                    self.result_display.append("Embeddings loaded successfully (no BM25). Ready to search.")
+                    self.status_display.append("Embeddings loaded successfully (no BM25). Ready to search.")
             else:
                 if GLOBAL_BM25_MODEL is not None:
-                    self.result_display.append("FastEmbed not installed. Embeddings won't be used.")
+                    self.status_display.append("FastEmbed not installed. Embeddings won't be used.")
                 else:
-                    self.result_display.append("No BM25 and no FastEmbed. Check your installation.")
+                    self.status_display.append("No BM25 and no FastEmbed. Check your installation.")
         else:
             if GLOBAL_BM25_MODEL is None:
-                self.result_display.setText("No corpus or BM25 model available.")
+                self.status_display.setText("No corpus or BM25 model available.")
             else:
-                self.result_display.append("Corpus loaded successfully. Ready to search.")
+                self.status_display.append("Corpus loaded successfully. Ready to search.")
 
     def init_ui(self):
         # ---------------------------------------------------------------------
-        # Instead of a simple layout, use a QSplitter with vertical orientation
-        # so top = text area, bottom = PDF viewer
+        # 使用 QSplitter 实现可调整的水平分割布局
+        # 左侧 = 搜索控制和结果显示，右侧 = PDF 预览
         # ---------------------------------------------------------------------
         splitter = QSplitter(Qt.Horizontal)
 
-        # Top widget (text area)
-        top_widget = QWidget()
-        top_layout = QVBoxLayout(top_widget)
+        # 左侧面板 (搜索区域)
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setSpacing(15)
+        left_layout.setContentsMargins(15, 15, 15, 15)
 
-        # Row for "Search method" and "Reranking method"
-        top_row_layout = QHBoxLayout()
+        # --- 标题区域 ---
+        title_layout = QVBoxLayout()
+        title_label = QLabel("PDF 智能搜索系统")
+        title_label.setStyleSheet("""
+            QLabel {
+                font-size: 22px;
+                font-weight: bold;
+                color: #2c3e50;
+                padding: 8px 0px;
+            }
+        """)
+        subtitle_label = QLabel("混合搜索引擎 - 语义理解 + 关键词匹配")
+        subtitle_label.setStyleSheet("""
+            QLabel {
+                font-size: 13px;
+                color: #7f8c8d;
+                padding-bottom: 8px;
+            }
+        """)
+        title_layout.addWidget(title_label)
+        title_layout.addWidget(subtitle_label)
+        left_layout.addLayout(title_layout)
 
+        # --- 分隔线 ---
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        line.setStyleSheet("background-color: #e0e0e0;")
+        left_layout.addWidget(line)
+
+        # --- 搜索方法和重排序选择 ---
+        method_group = QGroupBox("搜索配置")
+        method_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 13px;
+                font-weight: bold;
+                color: #34495e;
+                border: 2px solid #bdc3c7;
+                border-radius: 6px;
+                margin-top: 8px;
+                padding-top: 12px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 5px;
+            }
+        """)
+        method_layout = QVBoxLayout()
+        method_layout.setSpacing(12)
+
+        # 第一行：搜索方法
+        search_method_row = QHBoxLayout()
         self.search_method_label = QLabel("搜索方法:")
-        self.search_method_label.setStyleSheet("font-weight: bold; color: #495057;")
+        self.search_method_label.setStyleSheet("font-weight: bold; color: #495057; font-size: 13px;")
         self.search_method_combo = QComboBox()
         self.search_method_combo.addItem("混合搜索 (智能)")
         self.search_method_combo.addItem("语义搜索 (Embeddings)")
@@ -787,26 +1009,40 @@ class SearchApp(QMainWindow):
 
         self.search_method_combo.setStyleSheet("""
             QComboBox {
-                padding: 5px;
+                padding: 6px 10px;
                 border: 2px solid #dee2e6;
                 border-radius: 4px;
                 background: white;
+                font-size: 13px;
+                color: #34495e;
             }
             QComboBox:hover {
                 border-color: #007bff;
+                background-color: #f8f9fa;
+                color: #34495e;
             }
             QComboBox::drop-down {
                 border: none;
+                width: 25px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #34495e;
+                margin-right: 8px;
             }
         """)
         self.search_method_combo.currentIndexChanged.connect(self.update_rerank_combo_status)
 
-        top_row_layout.addWidget(self.search_method_label)
-        top_row_layout.addWidget(self.search_method_combo, 1)
-        top_row_layout.addSpacing(20)
+        search_method_row.addWidget(self.search_method_label)
+        search_method_row.addWidget(self.search_method_combo, 1)
+        method_layout.addLayout(search_method_row)
 
+        # 第二行：重排序方法
+        rerank_row = QHBoxLayout()
         self.rerank_label = QLabel("重排序:")
-        self.rerank_label.setStyleSheet("font-weight: bold; color: #495057;")
+        self.rerank_label.setStyleSheet("font-weight: bold; color: #495057; font-size: 13px;")
         self.rerank_combo = QComboBox()
         self.rerank_combo.addItem("无重排序")
         self.rerank_combo.addItem("最小跨度评分")
@@ -815,22 +1051,39 @@ class SearchApp(QMainWindow):
         self.rerank_combo.setEditable(False)
         self.rerank_combo.setStyleSheet("""
             QComboBox {
-                padding: 5px;
+                padding: 6px 10px;
                 border: 2px solid #dee2e6;
                 border-radius: 4px;
                 background: white;
+                font-size: 13px;
+                color: #34495e;
             }
             QComboBox:hover {
                 border-color: #007bff;
+                background-color: #f8f9fa;
+                color: #34495e;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 25px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #34495e;
+                margin-right: 8px;
             }
         """)
         self.rerank_combo.currentIndexChanged.connect(self.search)
 
-        top_row_layout.addWidget(self.rerank_label)
-        top_row_layout.addWidget(self.rerank_combo, 1)
-        top_row_layout.addSpacing(30)
+        rerank_row.addWidget(self.rerank_label)
+        rerank_row.addWidget(self.rerank_combo, 1)
+        method_layout.addLayout(rerank_row)
 
-        # 管理数据文件夹按钮
+        # 第三行：管理数据文件夹按钮
+        button_row = QHBoxLayout()
+        button_row.addStretch()
         self.manage_folders_button = QPushButton("管理数据文件夹")
         self.manage_folders_button.setToolTip("添加/删除/配置数据文件夹")
         self.manage_folders_button.setStyleSheet("""
@@ -838,9 +1091,10 @@ class SearchApp(QMainWindow):
                 background-color: #28a745;
                 color: white;
                 border: none;
-                padding: 6px 16px;
+                padding: 7px 18px;
                 border-radius: 4px;
                 font-weight: bold;
+                font-size: 13px;
             }
             QPushButton:hover {
                 background-color: #218838;
@@ -850,23 +1104,45 @@ class SearchApp(QMainWindow):
             }
         """)
         self.manage_folders_button.clicked.connect(self.on_manage_folders)
-        top_row_layout.addWidget(self.manage_folders_button)
+        button_row.addWidget(self.manage_folders_button)
+        method_layout.addLayout(button_row)
 
-        top_layout.addLayout(top_row_layout)
+        method_group.setLayout(method_layout)
+        left_layout.addWidget(method_group)
 
-        # Search label/input
-        self.query_label = QLabel("搜索查询:")
-        self.query_label.setStyleSheet("font-weight: bold; color: #495057;")
+        # --- 搜索输入和控制区域（合并版）---
+        search_group = QGroupBox("搜索")
+        search_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 13px;
+                font-weight: bold;
+                color: #34495e;
+                border: 2px solid #bdc3c7;
+                border-radius: 6px;
+                margin-top: 8px;
+                padding-top: 12px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 5px;
+            }
+        """)
+        search_layout = QVBoxLayout()
+        search_layout.setSpacing(10)
+
+        # 搜索输入框
         self.query_input = QLineEdit()
         self.query_input.setFont(QFont("Arial", self.font_size))
         self.query_input.setPlaceholderText("输入搜索关键词或短语...")
         self.query_input.setStyleSheet("""
             QLineEdit {
-                padding: 8px;
+                padding: 10px;
                 border: 2px solid #dee2e6;
                 border-radius: 4px;
                 background: white;
                 font-size: 14px;
+                color: #34495e;
             }
             QLineEdit:focus {
                 border-color: #007bff;
@@ -876,11 +1152,11 @@ class SearchApp(QMainWindow):
         # 启用输入法支持（修复 Rime 等输入法无法输入的问题）
         self.query_input.setAttribute(Qt.WA_InputMethodEnabled, True)
         self.query_input.returnPressed.connect(self.search)
-        top_layout.addWidget(self.query_label)
-        top_layout.addWidget(self.query_input)
+        search_layout.addWidget(self.query_input)
 
-        # Navigation buttons
-        button_layout = QHBoxLayout()
+        # 控制按钮行
+        controls_row = QHBoxLayout()
+        controls_row.setSpacing(10)
 
         # 结果导航按钮
         self.prev_button = QPushButton("◀ 上一个")
@@ -891,14 +1167,15 @@ class SearchApp(QMainWindow):
         self.next_button.clicked.connect(self.show_next_chunk)
 
         # 设置按钮样式
-        button_style = """
+        nav_button_style = """
             QPushButton {
                 background-color: #007bff;
                 color: white;
                 border: none;
-                padding: 6px 12px;
+                padding: 8px 16px;
                 border-radius: 4px;
                 font-weight: bold;
+                font-size: 13px;
             }
             QPushButton:hover {
                 background-color: #0056b3;
@@ -907,76 +1184,125 @@ class SearchApp(QMainWindow):
                 background-color: #004085;
             }
         """
-        self.prev_button.setStyleSheet(button_style)
-        self.next_button.setStyleSheet(button_style)
+        self.prev_button.setStyleSheet(nav_button_style)
+        self.next_button.setStyleSheet(nav_button_style)
 
-        button_layout.addWidget(self.prev_button)
-        button_layout.addWidget(self.next_button)
-        button_layout.addSpacing(20)
+        controls_row.addWidget(self.prev_button)
+        controls_row.addWidget(self.next_button)
+        controls_row.addSpacing(20)
 
-        # 字体大小按钮
-        self.decrease_font_button = QPushButton("A-")
-        self.increase_font_button = QPushButton("A+")
-        self.decrease_font_button.setToolTip("减小字体")
-        self.increase_font_button.setToolTip("增大字体")
-        self.decrease_font_button.clicked.connect(self.decrease_font_size)
-        self.increase_font_button.clicked.connect(self.increase_font_size)
-
-        font_button_style = """
-            QPushButton {
-                background-color: #6c757d;
-                color: white;
-                border: none;
-                padding: 6px 12px;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #545b62;
-            }
-        """
-        self.decrease_font_button.setStyleSheet(font_button_style)
-        self.increase_font_button.setStyleSheet(font_button_style)
-
-        button_layout.addWidget(self.decrease_font_button)
-        button_layout.addWidget(self.increase_font_button)
-        button_layout.addSpacing(20)
-
-        # --- PDF 裁剪复选框 ---
+        # PDF 裁剪复选框
         self.crop_pdf_view_checkbox = QCheckBox("裁剪 PDF 白边")
         self.crop_pdf_view_checkbox.setChecked(True)
         self.crop_pdf_view_checkbox.setToolTip("自动裁剪 PDF 页面的空白边距")
         self.crop_pdf_view_checkbox.toggled.connect(self.on_toggle_crop_pdf_view)
-        button_layout.addWidget(self.crop_pdf_view_checkbox)
-        button_layout.addStretch()  # 添加弹性空间，使按钮靠左对齐
-        # -------------------------------------------------
+        self.crop_pdf_view_checkbox.setStyleSheet("""
+            QCheckBox {
+                font-size: 12px;
+                color: #495057;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+            }
+        """)
+        controls_row.addWidget(self.crop_pdf_view_checkbox)
+        controls_row.addStretch()
 
-        top_layout.addLayout(button_layout)
+        search_layout.addLayout(controls_row)
+        search_group.setLayout(search_layout)
+        left_layout.addWidget(search_group)
 
-        # Results text area
-        self.result_display = QTextEdit()
-        self.result_display.setReadOnly(True)
-        self.result_display.setFont(QFont("Arial", self.font_size))
-        top_layout.addWidget(self.result_display)
+        # --- 搜索结果显示区域 ---
+        results_group = QGroupBox("搜索结果")
+        results_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 13px;
+                font-weight: bold;
+                color: #34495e;
+                border: 2px solid #bdc3c7;
+                border-radius: 6px;
+                margin-top: 8px;
+                padding-top: 12px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 5px;
+            }
+        """)
+        results_layout = QVBoxLayout()
 
-        splitter.addWidget(top_widget)  # add top widget to splitter
+        # 状态消息显示（用于初始化信息）
+        self.status_display = QTextEdit()
+        self.status_display.setReadOnly(True)
+        self.status_display.setFont(QFont("Arial", 11))
+        self.status_display.setStyleSheet("""
+            QTextEdit {
+                border: 1px solid #dee2e6;
+                border-radius: 4px;
+                background: #f8f9fa;
+                padding: 8px;
+                color: #495057;
+            }
+        """)
+        results_layout.addWidget(self.status_display)
 
-        # Bottom widget (PDF viewer)
+        # 自定义搜索结果 Widget（初始隐藏）
+        self.result_widget = ResultWidget()
+        self.result_widget.setVisible(False)
+        results_layout.addWidget(self.result_widget)
+
+        results_group.setLayout(results_layout)
+        left_layout.addWidget(results_group, 1)  # 让结果区域占据剩余空间
+
+        splitter.addWidget(left_widget)  # 添加左侧面板到分割器
+
+        # --- 右侧面板 (PDF 查看器) ---
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+
+        # PDF 查看器标题
+        pdf_title = QLabel("PDF 预览")
+        pdf_title.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                font-weight: bold;
+                color: #34495e;
+                padding: 10px;
+                background-color: #f8f9fa;
+                border-bottom: 2px solid #dee2e6;
+            }
+        """)
+        right_layout.addWidget(pdf_title)
+
         self.graphics_view = ClickableGraphicsView()
         self.graphics_view.set_search_app(self)  # Set reference to SearchApp
         self.graphics_scene = QGraphicsScene()
         self.graphics_view.setScene(self.graphics_scene)
-        splitter.addWidget(self.graphics_view)
+        self.graphics_view.setStyleSheet("""
+            QGraphicsView {
+                border: none;
+                background-color: #f5f5f5;
+            }
+        """)
+        right_layout.addWidget(self.graphics_view)
 
-        # Set the initial proportions (e.g., 30% for the left and 70% for the right)
-        splitter.setSizes([30, 700])  # Proportions are in pixels but will scale proportionally
+        splitter.addWidget(right_widget)
 
-        # Let both splitter panes expand or shrink
-        splitter.setStretchFactor(0, 1)  # top
-        splitter.setStretchFactor(1, 1)  # bottom
+        # 设置初始分割比例 (40% 左侧, 60% 右侧)
+        splitter.setSizes([400, 600])
 
-        # Create a container layout to hold just the splitter
+        # 允许两个面板都可以伸缩
+        splitter.setStretchFactor(0, 2)  # 左侧
+        splitter.setStretchFactor(1, 3)  # 右侧
+
+        # 创建容器布局
         container = QWidget()
         container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.addWidget(splitter)
 
         self.setCentralWidget(container)
@@ -1371,11 +1697,15 @@ class SearchApp(QMainWindow):
         self.query_terms = [remove_accents(w.lower()) for w in re.findall(r"\w+", raw_query, flags=re.IGNORECASE)]
 
         if not GLOBAL_CORPUS:
-            self.result_display.setText("No corpus loaded.")
+            self.status_display.setText("No corpus loaded.")
+            self.status_display.setVisible(True)
+            self.result_widget.setVisible(False)
             return
 
         if not raw_query:
-            self.result_display.setText("Please enter a search query.")
+            self.status_display.setText("Please enter a search query.")
+            self.status_display.setVisible(True)
+            self.result_widget.setVisible(False)
             return
 
         search_method = self.search_method_combo.currentText()
@@ -1408,7 +1738,7 @@ class SearchApp(QMainWindow):
 
                 # 调试日志
                 if self.results:
-                    print("\n🎯 混合搜索结果:")
+                    print("\n混合搜索结果:")
                     print(f"查询: '{raw_query}'")
                     print(f"总匹配文档数: {len(self.results)}")
                     print("\n前 5 个结果:")
@@ -1426,14 +1756,18 @@ class SearchApp(QMainWindow):
                 self.current_result_index = 0
 
                 if not self.results:
-                    self.result_display.setText("No results found.")
+                    self.status_display.setText("No results found.")
+                    self.status_display.setVisible(True)
+                    self.result_widget.setVisible(False)
                 else:
                     self.show_current_chunk()
                 self.status_bar.clearMessage()
                 return
 
             except Exception as e:
-                self.result_display.setText(f"Hybrid search error: {e}")
+                self.status_display.setText(f"Hybrid search error: {e}")
+                self.status_display.setVisible(True)
+                self.result_widget.setVisible(False)
                 import traceback
                 traceback.print_exc()
                 return
@@ -1461,7 +1795,9 @@ class SearchApp(QMainWindow):
             self.results = [(doc_id, 1.0) for doc_id in matches]
             self.current_result_index = 0
             if not self.results:
-                self.result_display.setText("No results found.")
+                self.status_display.setText("No results found.")
+                self.status_display.setVisible(True)
+                self.result_widget.setVisible(False)
             else:
                 self.show_current_chunk()
             self.status_bar.clearMessage()
@@ -1472,12 +1808,16 @@ class SearchApp(QMainWindow):
         # ---------------------------------------------------------------------
         if search_method == "语义搜索 (Embeddings)":
             if not self.embeddings_present:
-                self.result_display.setText("No .emb files found. Reverting to BM25 search.")
+                self.status_display.setText("No .emb files found. Reverting to BM25 search.")
+                self.status_display.setVisible(True)
+                self.result_widget.setVisible(False)
                 self.search_method_combo.setCurrentText("BM25 关键词")
                 return
 
             if not self.search_engine or not self.search_engine.embedding_searcher:
-                self.result_display.setText("Embedding searcher not available. Reverting to BM25 search.")
+                self.status_display.setText("Embedding searcher not available. Reverting to BM25 search.")
+                self.status_display.setVisible(True)
+                self.result_widget.setVisible(False)
                 self.search_method_combo.setCurrentText("BM25 关键词")
                 return
 
@@ -1491,7 +1831,7 @@ class SearchApp(QMainWindow):
 
             # 调试日志：显示前5个结果的详细信息
             if self.results:
-                print("\n🔍 优化后的 Embedding 搜索:")
+                print("\n优化后的 Embedding 搜索:")
                 print(f"查询: '{raw_query}'")
                 print(f"总匹配文档数: {len(self.results)}")
                 print(f"长度惩罚: 0.3 (优化后，原为 0.5)")
@@ -1510,7 +1850,9 @@ class SearchApp(QMainWindow):
             self.current_result_index = 0
 
             if not self.results:
-                self.result_display.setText("No results found.")
+                self.status_display.setText("No results found.")
+                self.status_display.setVisible(True)
+                self.result_widget.setVisible(False)
             else:
                 self.show_current_chunk()
             self.status_bar.clearMessage()
@@ -1531,7 +1873,9 @@ class SearchApp(QMainWindow):
                 elif not norm_term.startswith('-'):
                     positive_keywords.append(norm_term)
             if not positive_keywords:
-                self.result_display.setText("Search requires at least one positive keyword.")
+                self.status_display.setText("Search requires at least one positive keyword.")
+                self.status_display.setVisible(True)
+                self.result_widget.setVisible(False)
                 return
 
             # Prepare corpus statistics
@@ -1620,7 +1964,9 @@ class SearchApp(QMainWindow):
                 results_with_flag.append((contains_all, combined, doc_id))
 
             if not results_with_flag:
-                self.result_display.setText("No matching documents found.")
+                self.status_display.setText("No matching documents found.")
+                self.status_display.setVisible(True)
+                self.result_widget.setVisible(False)
                 return
 
             # Sort by whether all keywords matched, then by score
@@ -1637,7 +1983,9 @@ class SearchApp(QMainWindow):
         # CASE 4: "BM25"
         # ---------------------------------------------------------------------
         if GLOBAL_BM25_MODEL is None:
-            self.result_display.setText("No BM25 model is available.")
+            self.status_display.setText("No BM25 model is available.")
+            self.status_display.setVisible(True)
+            self.result_widget.setVisible(False)
             return
 
         tokenized_query = bm25s.tokenize(raw_query, stopwords="en")
@@ -1666,7 +2014,9 @@ class SearchApp(QMainWindow):
         self.current_result_index = 0
 
         if not self.results:
-            self.result_display.setText("No results found.")
+            self.status_display.setText("No results found.")
+            self.status_display.setVisible(True)
+            self.result_widget.setVisible(False)
         else:
             self.show_current_chunk()
 
@@ -1689,59 +2039,65 @@ class SearchApp(QMainWindow):
     def show_current_chunk(self):
         global GLOBAL_CORPUS
         if not self.results:
-            self.result_display.setText("No results found.")
+            self.status_display.setText("No results found.")
+            self.status_display.setVisible(True)
+            self.result_widget.setVisible(False)
             return
+
+        # 隐藏状态显示，显示结果Widget
+        self.status_display.setVisible(False)
+        self.result_widget.setVisible(True)
 
         doc_id, score = self.results[self.current_result_index]
         chunk_data = GLOBAL_CORPUS[doc_id]
 
-        # We'll highlight them in the chunk text (if any).
+        # 获取粒度信息
+        chunk_type = chunk_data.get('chunk_type', 'page')
+        chunk_index = chunk_data.get('chunk_index', '')
+
+        # 粒度显示文本（直接传递给widget）
+        chunk_type_display = {
+            'page': '页面',
+            'paragraph': '段落',
+            'fixed': '固定块'
+        }.get(chunk_type, '未知')
+
+        # 高亮显示查询词
         text_to_display = chunk_data.get('text', "")
         highlighted_chunk = self.highlight_query_terms(text_to_display)
 
-        # Get match tags if available (for hybrid search)
-        match_tags_html = ""
+        # 准备匹配标签（混合搜索）
+        tags = []
         if hasattr(self, 'match_tags') and doc_id in self.match_tags:
-            tags = self.match_tags[doc_id]
-            # 为不同的匹配类型添加彩色标签
             tag_colors = {
-                "精确匹配": "#28a745",  # 绿色 - 最高优先级
+                "精确匹配": "#28a745",  # 绿色
                 "部分匹配": "#007bff",  # 蓝色
                 "语义相关": "#6f42c1",  # 紫色
                 "关键词": "#fd7e14"     # 橙色
             }
-            tag_badges = []
-            for tag in tags.split(','):
+            for tag in self.match_tags[doc_id].split(','):
                 tag = tag.strip()
-                color = tag_colors.get(tag, "#6c757d")  # 默认灰色
-                tag_badges.append(
-                    f'<span style="background-color: {color}; color: white; '
-                    f'padding: 2px 8px; border-radius: 3px; margin-right: 5px; '
-                    f'font-size: 11px; font-weight: bold;">{tag}</span>'
-                )
-            match_tags_html = f"<b>匹配方式:</b> {''.join(tag_badges)}<br>"
+                color = tag_colors.get(tag, "#6c757d")
+                tags.append((tag, color))
 
-        self.result_display.setHtml(
-            f'<div style="font-family: Arial, sans-serif;">'
-            f'<div style="background-color: #f8f9fa; padding: 10px; border-radius: 5px; margin-bottom: 10px;">'
-            f'<b style="color: #495057;">结果 {self.current_result_index + 1} / {len(self.results)}</b><br>'
-            f'<b style="color: #495057;">文件:</b> <span style="color: #212529;">{os.path.basename(chunk_data.get("filename",""))}</span><br>'
-            f'<b style="color: #495057;">页码:</b> <span style="color: #212529;">{chunk_data.get("page_number","")}</span><br>'
-            f'{match_tags_html}'
-            f'<b style="color: #495057;">相关度:</b> <span style="color: #007bff; font-weight: bold;">{score:.4f}</span>'
-            f'</div>'
-            f'<div style="padding: 10px; background-color: white; border-left: 3px solid #007bff;">'
-            f'{highlighted_chunk}'
-            f'</div>'
-            f'</div>'
+        # 更新 ResultWidget
+        self.result_widget.update_result(
+            result_num=self.current_result_index + 1,
+            total_results=len(self.results),
+            filename=os.path.basename(chunk_data.get("filename", "")),
+            page_num=chunk_data.get("page_number", ""),
+            granularity=chunk_type_display,
+            chunk_index=chunk_index,
+            score=score,
+            tags=tags,
+            highlighted_text=highlighted_chunk
         )
 
+        # 显示 PDF 预览
         pdf_path = chunk_data.get('filename','')
         page_number = chunk_data.get('page_number', 1)
         if pdf_path and os.path.exists(pdf_path):
             self.display_pdf_page(pdf_path, page_number)
-        else:
-            self.result_display.append("<br><i>No PDF or page info available, or PDF not found.</i>")
 
     def highlight_query_terms(self, text):
         normalized_text = remove_accents(text)
@@ -1840,20 +2196,9 @@ class SearchApp(QMainWindow):
         self.current_result_index = (self.current_result_index - 1) % len(self.results)
         self.show_current_chunk()
 
-    def increase_font_size(self):
-        self.font_size += 1
-        self.result_display.setFont(QFont("Arial", self.font_size))
-        self.query_input.setFont(QFont("Arial", self.font_size))
-
-    def decrease_font_size(self):
-        if self.font_size > 1:
-            self.font_size -= 1
-            self.result_display.setFont(QFont("Arial", self.font_size))
-            self.query_input.setFont(QFont("Arial", self.font_size))
-
     def on_manage_folders(self):
         """
-        Opens the FoldersDialog to manage the folders. 
+        Opens the FoldersDialog to manage the folders.
         If the user clicks OK, we update 'folders.ini' and reload the corpus.
         """
         global FOLDERS_DB
@@ -1869,15 +2214,17 @@ class SearchApp(QMainWindow):
             # Reload the corpus
             GLOBAL_CORPUS.clear()
             errors, status = load_corpus_and_initialize_bm25(FOLDERS_DB)
-            self.result_display.clear()
+            self.status_display.clear()
+            self.status_display.setVisible(True)
+            self.result_widget.setVisible(False)
             for err in errors:
-                self.result_display.append(err)
-            self.result_display.append(status)
+                self.status_display.append(err)
+            self.status_display.append(status)
 
             # Check if embeddings are present
             self.embeddings_present = any(('embedding' in doc) for doc in GLOBAL_CORPUS)
             if self.embeddings_present:
-                success = init_embedding_model(lambda msg: self.result_display.append(msg))
+                success = init_embedding_model(lambda msg: self.status_display.append(msg))
                 if success:
                     # ← added: 重新初始化优化的搜索引擎
                     self.search_engine = SearchEngine(
@@ -1885,13 +2232,13 @@ class SearchApp(QMainWindow):
                         bm25_model=GLOBAL_BM25_MODEL,
                         embed_model=GLOBAL_EMBED_MODEL
                     )
-                    self.result_display.append("Folders updated. Corpus and embeddings loaded.")
+                    self.status_display.append("Folders updated. Corpus and embeddings loaded.")
                 else:
                     self.search_engine = None
-                    self.result_display.append("Folders updated. Embeddings found, but fastembed is not installed.")
+                    self.status_display.append("Folders updated. Embeddings found, but fastembed is not installed.")
             else:
                 self.search_engine = None
-                self.result_display.append("Folders updated.")
+                self.status_display.append("Folders updated.")
         else:
             # user canceled => do nothing
             pass
