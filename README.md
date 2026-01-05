@@ -7,6 +7,8 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.11+-green.svg)
 
+![screenshot](docs/screenshot.webp)
+
 ---
 
 ## ✨ 核心特性
