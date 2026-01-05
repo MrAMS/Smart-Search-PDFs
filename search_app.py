@@ -756,13 +756,6 @@ class SearchApp(QMainWindow):
                 self.result_display.append("Corpus loaded successfully. Ready to search.")
 
     def init_ui(self):
-        # MENU
-        menubar = self.menuBar()
-        data_folders_menu = menubar.addMenu("Data folders")
-        manage_folders_action = QAction("Manage folders...", self)
-        manage_folders_action.triggered.connect(self.on_manage_folders)
-        data_folders_menu.addAction(manage_folders_action)
-
         # ---------------------------------------------------------------------
         # Instead of a simple layout, use a QSplitter with vertical orientation
         # so top = text area, bottom = PDF viewer
@@ -835,6 +828,29 @@ class SearchApp(QMainWindow):
 
         top_row_layout.addWidget(self.rerank_label)
         top_row_layout.addWidget(self.rerank_combo, 1)
+        top_row_layout.addSpacing(30)
+
+        # 管理数据文件夹按钮
+        self.manage_folders_button = QPushButton("管理数据文件夹")
+        self.manage_folders_button.setToolTip("添加/删除/配置数据文件夹")
+        self.manage_folders_button.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                border: none;
+                padding: 6px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+            QPushButton:pressed {
+                background-color: #1e7e34;
+            }
+        """)
+        self.manage_folders_button.clicked.connect(self.on_manage_folders)
+        top_row_layout.addWidget(self.manage_folders_button)
 
         top_layout.addLayout(top_row_layout)
 
