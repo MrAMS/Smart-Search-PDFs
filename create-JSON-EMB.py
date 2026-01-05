@@ -10,6 +10,46 @@ from PyQt5 import QtCore, QtWidgets
 BATCH_PROCESSING_ENABLED = False
 
 # ---------------------------
+# Utility functions
+# ---------------------------
+def clean_text_for_json(text):
+    """
+    清理文本中的无效 Unicode 字符（如 surrogate pairs）
+    这些字符无法被 UTF-8 编码，会导致 JSON 保存失败
+    """
+    if not text:
+        return text
+
+    # 移除 surrogate pairs（0xD800-0xDFFF 范围的字符）
+    # 这些通常来自 PDF 中的特殊数学符号
+    cleaned = ""
+    for char in text:
+        code = ord(char)
+        # 跳过 surrogate pairs 范围的字符
+        if 0xD800 <= code <= 0xDFFF:
+            # 可以选择替换为空格或特殊标记
+            cleaned += " "  # 或使用 "[MATH]" 等标记
+        else:
+            cleaned += char
+
+    return cleaned
+
+
+def normalize_embedding(embedding):
+    """
+    归一化 embedding 向量到单位长度
+    这确保余弦相似度计算的准确性
+    """
+    if isinstance(embedding, list):
+        embedding = np.array(embedding)
+
+    norm = np.linalg.norm(embedding)
+    if norm > 0:
+        return embedding / norm
+    else:
+        return embedding
+
+# ---------------------------
 # External library functions
 # ---------------------------
 import pymupdf4llm
@@ -35,8 +75,12 @@ def extract_page_chunks(file_path, log_callback=None):
     try:
         data = pymupdf4llm.to_markdown(file_path, page_chunks=True)
         for page in data:
+            # 清理文本中的无效 Unicode 字符
+            raw_text = page["text"]
+            cleaned_text = clean_text_for_json(raw_text)
+
             chunks.append({
-                "text": page["text"],
+                "text": cleaned_text,
                 "page_number": page.get("metadata", {}).get("page", None),
                 "filename": os.path.basename(file_path)
             })
@@ -83,7 +127,7 @@ def embed_pages_in_json(json_file_path, embedding_model, log_callback):
     """
     Reads a JSON file containing text chunks (pages),
     generates embeddings for each chunk (using the given embedding_model) one page at a time,
-    removes the text field, and returns the updated list.
+    normalizes embeddings, removes the text field, and returns the updated list.
     """
     with open(json_file_path, "r", encoding="utf-8") as json_file:
         pages = json.load(json_file)
@@ -95,6 +139,10 @@ def embed_pages_in_json(json_file_path, embedding_model, log_callback):
             try:
                 embedding_gen = embedding_model.passage_embed([page["text"]])
                 embedding = list(embedding_gen)[0]
+
+                # 归一化 embedding
+                embedding = normalize_embedding(embedding)
+
                 if isinstance(embedding, np.ndarray):
                     page["embedding"] = embedding.tolist()
                 else:
@@ -107,6 +155,7 @@ def embed_pages_in_json(json_file_path, embedding_model, log_callback):
 def embed_pages_in_json_batch(json_file_path, embedding_model, log_callback):
     """
     Batch embeds all pages from the JSON file at once.
+    Normalizes embeddings for better quality.
     If an error occurs, falls back to page-by-page processing.
     """
     with open(json_file_path, "r", encoding="utf-8") as json_file:
@@ -121,6 +170,9 @@ def embed_pages_in_json_batch(json_file_path, embedding_model, log_callback):
         embedding_gen = embedding_model.passage_embed(texts)
         embeddings = list(embedding_gen)
         for i, embedding in enumerate(embeddings):
+            # 归一化 embedding
+            embedding = normalize_embedding(embedding)
+
             if isinstance(embedding, np.ndarray):
                 pages[i]["embedding"] = embedding.tolist()
             else:
@@ -138,15 +190,45 @@ def process_json_to_emb(folder, log_callback):
     Processes all JSON files in the folder.
     For each JSON file that does not have a corresponding .emb file,
     generates embeddings and saves the result as a .emb file.
+    Uses jinaai/jina-embeddings-v2-base-zh for Chinese-English mixed text support.
     """
     if not FASTEMBED_AVAILABLE:
         log_callback("Fastembed library not installed, EMB files creation disabled.")
         return
 
     try:
-        embedding_model = TextEmbedding(model_name="nomic-ai/nomic-embed-text-v1")
+        # 设置模型缓存目录（使用用户主目录下的 .cache/fastembed）
+        cache_dir = os.path.expanduser("~/.cache/fastembed")
+        model_name = "jinaai/jina-embeddings-v2-base-zh"
+
+        # 检查模型是否已缓存
+        model_cache_path = os.path.join(cache_dir, model_name.replace("/", "--"))
+        if os.path.exists(model_cache_path):
+            log_callback(f"✅ 检测到缓存的模型: {model_name}")
+            log_callback(f"   缓存路径: {model_cache_path}")
+        else:
+            log_callback(f"⏬ 首次使用，需要下载模型: {model_name}")
+            log_callback(f"   将缓存到: {cache_dir}")
+            log_callback("   这可能需要几分钟，请耐心等待...")
+
+        # 使用 jinaai/jina-embeddings-v2-base-zh - 专门支持中英文混合
+        # 特点:
+        # - 768 维度 embedding
+        # - 8192 token 长文本支持（适合 PDF 页面）
+        # - 2024 年发布，较新
+        # - 不需要特殊前缀
+        #
+        # 备选模型：
+        # - "jinaai/jina-embeddings-v3" - 多语言（~100种），1024维，8192 token
+        # - "BAAI/bge-small-zh-v1.5" - 中文专用，512维，512 token
+        # - "intfloat/multilingual-e5-large" - 多语言（~100种），1024维，512 token
+        log_callback("初始化 embedding 模型: jinaai/jina-embeddings-v2-base-zh (中英文混合)")
+        embedding_model = TextEmbedding(model_name=model_name, cache_dir=cache_dir)
+        log_callback("✅ 模型加载成功 (768维, 支持8192 token)")
+        log_callback(f"   模型将被复用，下次运行无需重新下载")
     except Exception as e:
         log_callback(f"Error initializing embedding model: {e}")
+        log_callback("提示：如果模型下载失败，请检查网络连接或尝试使用镜像")
         return
 
     json_files = [f for f in os.listdir(folder) if f.lower().endswith(".json")]

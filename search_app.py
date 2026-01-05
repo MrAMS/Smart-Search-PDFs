@@ -3,10 +3,14 @@ import re
 import sys
 import json
 import subprocess
-import platform 
+import platform
 import math                              # ← added
 import numpy as np
 from collections import Counter         # ← added
+
+# 导入优化的搜索引擎模块
+from search_engine import SearchEngine, EmbeddingSearcher  # ← added
+
 from PyQt5.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -38,7 +42,7 @@ from PyQt5.QtWidgets import (
     QSplitter
 )
 from PyQt5.QtGui import QPixmap, QFont, QColor, QKeySequence
-from PyQt5.QtCore import Qt, QRectF
+from PyQt5.QtCore import Qt, QRectF, QTimer
 import fitz  # PyMuPDF
 import unicodedata
 
@@ -78,6 +82,57 @@ FOLDERS_DB = []
 def remove_accents(input_str):
     nfkd_form = unicodedata.normalize('NFD', input_str)
     return ''.join([c for c in nfkd_form if not unicodedata.combining(c)])
+
+
+def init_embedding_model(log_callback=None):
+    """
+    初始化全局 embedding 模型（如果尚未初始化）。
+    使用缓存目录避免重复下载。
+    返回 True 表示成功，False 表示失败。
+    """
+    global GLOBAL_EMBED_MODEL, FASTEMBED_AVAILABLE
+
+    # 如果已经初始化，直接返回
+    if GLOBAL_EMBED_MODEL is not None:
+        if log_callback:
+            log_callback("✅ Embedding 模型已加载，无需重新初始化")
+        return True
+
+    # 检查 fastembed 是否可用
+    if not FASTEMBED_AVAILABLE:
+        if log_callback:
+            log_callback("FastEmbed not installed. Embeddings won't be used.")
+        return False
+
+    try:
+        # 设置模型缓存目录
+        cache_dir = os.path.expanduser("~/.cache/fastembed")
+        model_name = "jinaai/jina-embeddings-v2-base-zh"
+
+        # 检查模型是否已缓存
+        model_cache_path = os.path.join(cache_dir, model_name.replace("/", "--"))
+        if os.path.exists(model_cache_path):
+            if log_callback:
+                log_callback(f"✅ 使用缓存的模型: {model_name}")
+        else:
+            if log_callback:
+                log_callback(f"⏬ 首次使用，下载模型: {model_name}")
+                log_callback("   这可能需要几分钟，请耐心等待...")
+
+        if log_callback:
+            log_callback("Initializing embedding model (jinaai/jina-embeddings-v2-base-zh)...")
+
+        GLOBAL_EMBED_MODEL = TextEmbedding(model_name=model_name, cache_dir=cache_dir)
+
+        if log_callback:
+            log_callback("✅ Embedding 模型加载成功 (768维, 8192 token)")
+            log_callback("   模型已缓存，下次运行将直接使用")
+        return True
+
+    except Exception as e:
+        if log_callback:
+            log_callback(f"Error initializing embedding model: {e}")
+        return False
 
 
 def load_folders_database():
@@ -179,6 +234,18 @@ def load_corpus_and_initialize_bm25(folders_list):
 
     # Attempt to load embeddings for each JSON
     load_embeddings_for_corpus(all_json_files)
+
+    # 验证 embedding 质量
+    valid_count, issues = validate_corpus_embeddings(GLOBAL_CORPUS)
+    if valid_count > 0:
+        print(f"✅ 加载了 {valid_count} 个文档的 embeddings")
+        if issues:
+            print(f"⚠️  发现 {len(issues)} 个质量问题:")
+            for issue in issues[:10]:  # 只显示前10个
+                print(f"   {issue}")
+            if len(issues) > 10:
+                print(f"   ... 还有 {len(issues) - 10} 个问题")
+
     return error_messages, "BM25 model successfully initialized."
 
 
@@ -231,6 +298,47 @@ def load_embeddings_for_corpus(json_file_list):
         corpus_index += num_pages
 
     print(f"Loaded embeddings for {emb_count} pages total.")
+
+
+def validate_corpus_embeddings(corpus):
+    """
+    验证语料库中 embedding 的质量和一致性
+    返回：(valid_count, issues_list)
+    """
+    issues = []
+    valid_count = 0
+    expected_dim = None
+
+    for idx, doc in enumerate(corpus):
+        if 'embedding' not in doc:
+            continue
+
+        emb = np.array(doc['embedding'])
+        valid_count += 1
+
+        # 检查维度一致性
+        if expected_dim is None:
+            expected_dim = len(emb)
+        elif len(emb) != expected_dim:
+            issues.append(f"文档 {idx} ({doc.get('filename', 'unknown')}): "
+                         f"维度不匹配 ({len(emb)} vs 预期 {expected_dim})")
+
+        # 检查向量范数（是否归一化）
+        emb_norm = np.linalg.norm(emb)
+        if emb_norm < 0.01:  # 接近零向量
+            issues.append(f"文档 {idx} ({doc.get('filename', 'unknown')}): "
+                         f"向量接近零 (norm={emb_norm:.6f})")
+        elif not (0.9 < emb_norm < 1.1):  # 不在归一化范围
+            issues.append(f"文档 {idx} ({doc.get('filename', 'unknown')}): "
+                         f"可能未归一化 (norm={emb_norm:.4f})")
+
+        # 检查是否包含 NaN 或 Inf
+        if np.any(np.isnan(emb)):
+            issues.append(f"文档 {idx} ({doc.get('filename', 'unknown')}): 包含 NaN 值")
+        if np.any(np.isinf(emb)):
+            issues.append(f"文档 {idx} ({doc.get('filename', 'unknown')}): 包含 Inf 值")
+
+    return valid_count, issues
 
 
 ###############################################################################
@@ -323,7 +431,7 @@ def parse_simple_search_query(query_str):
 
 
 ###############################################################################
-# A custom QGraphicsView to handle clicking on PDF pages (unchanged)
+# A custom QGraphicsView with dynamic page loading support
 ###############################################################################
 class ClickableGraphicsView(QGraphicsView):
     def __init__(self, parent=None):
@@ -332,32 +440,135 @@ class ClickableGraphicsView(QGraphicsView):
         self.current_page = 1
         self.total_pages = 1
 
+        # Dynamic loading attributes
+        self.rendered_pages = {}  # {page_num: (pixmap_item, y_position, height)}
+        self.first_rendered_page = None
+        self.last_rendered_page = None
+        self.page_gap = 0
+        self.is_loading = False
+
+        # Store reference to SearchApp (will be set after init)
+        self.search_app = None
+
+        # Auto-fit width control
+        self.auto_fit_width = True  # Enable auto-fit by default
+        self.resize_timer = None  # Timer to debounce resize events
+
+        # Connect scroll event
+        self.verticalScrollBar().valueChanged.connect(self.on_scroll)
+
+    def set_search_app(self, search_app):
+        """Set reference to the main SearchApp instance."""
+        self.search_app = search_app
+
     def set_pdf_details(self, pdf_path, page, total_pages):
         self.current_pdf_path = pdf_path
         self.current_page = page
         self.total_pages = total_pages
 
+    def clear_rendered_pages(self):
+        """Clear all tracking of rendered pages."""
+        self.rendered_pages.clear()
+        self.first_rendered_page = None
+        self.last_rendered_page = None
+
+    def on_scroll(self, value):
+        """Handle scroll events to trigger dynamic loading."""
+        if self.is_loading or not self.current_pdf_path or not self.search_app:
+            return
+
+        vbar = self.verticalScrollBar()
+        threshold = 500  # Trigger loading when within 500 pixels of edge
+
+        # Check if near top
+        if value < threshold and self.first_rendered_page and self.first_rendered_page > 1:
+            self.load_previous_pages()
+
+        # Check if near bottom
+        elif (vbar.maximum() - value) < threshold and self.last_rendered_page and self.last_rendered_page < self.total_pages:
+            self.load_next_pages()
+
+    def load_previous_pages(self):
+        """Request loading of previous pages from SearchApp."""
+        if self.search_app:
+            self.is_loading = True
+            try:
+                self.search_app.load_previous_pages()
+            finally:
+                self.is_loading = False
+
+    def load_next_pages(self):
+        """Request loading of next pages from SearchApp."""
+        if self.search_app:
+            self.is_loading = True
+            try:
+                self.search_app.load_next_pages()
+            finally:
+                self.is_loading = False
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and self.current_pdf_path:
-            try:
-                if platform.system() == "Windows":
-                    # Call Adobe Acrobat Reader on Windows.
-                    subprocess.run([
-                        "AcroRd32.exe",
-                        "/A", f"page={self.current_page}",
-                        self.current_pdf_path
-                    ])
-                else:
-                    # Use Okular on Linux.
-                    subprocess.run([
-                        "okular",
-                        self.current_pdf_path,
-                        "-p",
-                        str(self.current_page)
-                    ])
-            except Exception as e:
-                print(f"Failed to open PDF: {e}")
+            self.open_pdf_externally()
         super().mousePressEvent(event)
+
+    def resizeEvent(self, event):
+        """Handle window resize events to auto-fit PDF width."""
+        super().resizeEvent(event)
+
+        # Only auto-adjust if enabled and we have a PDF loaded
+        if self.auto_fit_width and self.current_pdf_path and self.search_app:
+            # Use a timer to debounce resize events (avoid too many re-renders)
+            if self.resize_timer is not None:
+                self.resize_timer.stop()
+                self.resize_timer.deleteLater()
+
+            self.resize_timer = QTimer()
+            self.resize_timer.setSingleShot(True)
+            self.resize_timer.timeout.connect(self._on_resize_finished)
+            self.resize_timer.start(300)  # Wait 300ms after resize stops
+
+    def _on_resize_finished(self):
+        """Called after resize event has settled."""
+        if self.search_app and self.current_pdf_path:
+            # Calculate new scale factor and re-render
+            self.search_app.auto_fit_pdf_width()
+
+    def open_pdf_externally(self):
+        """Try to open PDF in external viewer with fallback options."""
+        if not self.current_pdf_path:
+            return
+
+        try:
+            if platform.system() == "Windows":
+                # Try Adobe Reader, then default viewer
+                readers = [
+                    ["AcroRd32.exe", "/A", f"page={self.current_page}", self.current_pdf_path],
+                    ["start", "", self.current_pdf_path]  # Default Windows viewer
+                ]
+            else:
+                # Try multiple Linux PDF viewers
+                readers = [
+                    ["okular", self.current_pdf_path, "-p", str(self.current_page)],
+                    ["evince", "--page-label=" + str(self.current_page), self.current_pdf_path],
+                    ["xdg-open", self.current_pdf_path],  # System default
+                ]
+
+            opened = False
+            for cmd in readers:
+                try:
+                    subprocess.run(cmd, check=False, stderr=subprocess.DEVNULL)
+                    opened = True
+                    break
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    continue
+
+            if not opened:
+                print(f"Warning: No PDF viewer found. Please install okular, evince, or set a default PDF viewer.")
+
+        except Exception as e:
+            print(f"Error opening PDF externally: {e}")
 
 
 ###############################################################################
@@ -490,6 +701,7 @@ class SearchApp(QMainWindow):
         self.scale_factor = 1.0
 
         self.embeddings_present = False  # whether we found .emb files
+        self.search_engine = None  # ← added: 优化的搜索引擎
         self.init_ui()
 
         # ---------------------------------------------------------------------
@@ -519,10 +731,15 @@ class SearchApp(QMainWindow):
         self.embeddings_present = any(('embedding' in doc) for doc in GLOBAL_CORPUS)
 
         # Attempt to initialize the global embedding model if we have embeddings
-        global GLOBAL_EMBED_MODEL, FASTEMBED_AVAILABLE
         if self.embeddings_present:
-            if FASTEMBED_AVAILABLE:
-                GLOBAL_EMBED_MODEL = TextEmbedding(model_name="nomic-ai/nomic-embed-text-v1")
+            success = init_embedding_model(lambda msg: self.result_display.append(msg))
+            if success:
+                # ← added: 初始化优化的搜索引擎
+                self.search_engine = SearchEngine(
+                    corpus=GLOBAL_CORPUS,
+                    bm25_model=GLOBAL_BM25_MODEL,
+                    embed_model=GLOBAL_EMBED_MODEL
+                )
                 if GLOBAL_BM25_MODEL is not None:
                     self.result_display.append("Corpus and Embeddings loaded successfully. Ready to search.")
                 else:
@@ -561,10 +778,10 @@ class SearchApp(QMainWindow):
 
         self.search_method_label = QLabel("Search method:")
         self.search_method_combo = QComboBox()
+        self.search_method_combo.addItem("Embeddings search")      # ← 默认首选
         self.search_method_combo.addItem("BM25")
-        self.search_method_combo.addItem("BM25 substring")         # ← added
+        self.search_method_combo.addItem("BM25 substring")
         self.search_method_combo.addItem("Simple text search")
-        self.search_method_combo.addItem("Embeddings search")
         self.search_method_combo.currentIndexChanged.connect(self.update_rerank_combo_status)
 
         top_row_layout.addWidget(self.search_method_label)
@@ -588,6 +805,8 @@ class SearchApp(QMainWindow):
         self.query_label = QLabel("Search query:")
         self.query_input = QLineEdit()
         self.query_input.setFont(QFont("Arial", self.font_size))
+        # 启用输入法支持（修复 Rime 等输入法无法输入的问题）
+        self.query_input.setAttribute(Qt.WA_InputMethodEnabled, True)
         self.query_input.returnPressed.connect(self.search)
         top_layout.addWidget(self.query_label)
         top_layout.addWidget(self.query_input)
@@ -628,6 +847,7 @@ class SearchApp(QMainWindow):
 
         # Bottom widget (PDF viewer)
         self.graphics_view = ClickableGraphicsView()
+        self.graphics_view.set_search_app(self)  # Set reference to SearchApp
         self.graphics_scene = QGraphicsScene()
         self.graphics_view.setScene(self.graphics_scene)
         splitter.addWidget(self.graphics_view)
@@ -680,89 +900,316 @@ class SearchApp(QMainWindow):
             self.rerank_combo.setEnabled(True)
 
     # -------------------------------------------------------------------------
-    # PDF display and navigation (unchanged)
+    # PDF display and navigation with dynamic loading
     # -------------------------------------------------------------------------
     def display_pdf_page(self, pdf_path, page_number):
+        """
+        Initialize PDF viewer with the target page and surrounding pages.
+        Sets up dynamic loading for continuous scrolling.
+        """
         try:
-            doc = fitz.open(pdf_path)
-            page = doc[page_number - 1]
-
-            # Apply cropping if enabled, else reset to full page view
-            if self.crop_pdf_view_checkbox.isChecked():
-                # Calculate the bounding box of all text blocks
-                text_blocks = page.get_text("blocks")
-                if not text_blocks:
-                    print("No text found on the page.")
-                    return
-
-                # Initialize bounding box coordinates
-                x_min = float('inf')
-                y_min = float('inf')
-                x_max = float('-inf')
-                y_max = float('-inf')
-
-                # Determine the bounding box encompassing all text
-                for block in text_blocks:
-                    x0, y0, x1, y1 = block[:4]
-                    x_min = min(x_min, x0)
-                    y_min = min(y_min, y0)
-                    x_max = max(x_max, x1)
-                    y_max = max(y_max, y1)
-
-                # Define the new crop box
-                crop_box = fitz.Rect(x_min, y_min, x_max, y_max)
-
-                # Retrieve the media box
-                media_box = page.mediabox
-
-                # Check if the crop box is within the media box
-                if (crop_box.x0 >= media_box.x0 and crop_box.y0 >= media_box.y0 and
-                    crop_box.x1 <= media_box.x1 and crop_box.y1 <= media_box.y1):
-                    # Set the crop box if it's valid
-                    page.set_cropbox(crop_box)
-                else:
-                    print("Calculated crop box is not within the media box. Rendering the full page.")
-            else:
-                # If cropping is disabled, ensure the full page is shown.
-                pass
-                #page.set_cropbox(page.mediabox)
-
-            # Render the page
-            base_dpi = 150  # base DPI for default zoom
-            dpi = base_dpi * self.scale_factor
-            zoom = dpi / 72
-            mat = fitz.Matrix(zoom, zoom)
-            pix = page.get_pixmap(matrix=mat)
-
-            # Convert to QPixmap for display
-            qt_img = QPixmap()
-            qt_img.loadFromData(pix.tobytes("ppm"))
-
-            # Display the image in the graphics scene
+            # Clear previous rendering state
+            self.graphics_view.clear_rendered_pages()
             self.graphics_scene.clear()
-            pixmap_item = QGraphicsPixmapItem(qt_img)
-            self.graphics_scene.addItem(pixmap_item)
 
-            # Highlight search terms in PDF view (modified to substring match)
-            word_positions = page.get_text("words")
-            for word in word_positions:
-                raw_word = word[4].lower()
-                raw_word = remove_accents(raw_word)
-                raw_word = re.sub(r"[^\w]+", "", raw_word)
+            # Open document
+            doc = fitz.open(pdf_path)
+            total_pages = len(doc)
 
-                if any(nt in raw_word for nt in self.query_terms):  # ← modified
-                    rect = QRectF(word[0] * zoom, word[1] * zoom,
-                                  (word[2] - word[0]) * zoom,
-                                  (word[3] - word[1]) * zoom)
-                    highlight = QGraphicsRectItem(rect)
-                    highlight.setBrush(QColor(255, 255, 0, 128))
-                    self.graphics_scene.addItem(highlight)
+            # Set PDF details
+            self.graphics_view.set_pdf_details(pdf_path, page_number, total_pages)
 
-            self.graphics_view.set_pdf_details(pdf_path, page_number, len(doc))
-            self.graphics_scene.setSceneRect(self.graphics_scene.itemsBoundingRect())
+            # Auto-fit width on first load if enabled
+            if self.graphics_view.auto_fit_width:
+                # Get the current page dimensions
+                page = doc[page_number - 1]
+
+                # Apply cropping if enabled to get actual content dimensions
+                if self.crop_pdf_view_checkbox.isChecked():
+                    text_blocks = page.get_text("blocks")
+                    if text_blocks:
+                        x_min = min(block[0] for block in text_blocks)
+                        x_max = max(block[2] for block in text_blocks)
+                        page_width = x_max - x_min
+                    else:
+                        page_width = page.rect.width
+                else:
+                    page_width = page.rect.width
+
+                # Calculate available width
+                view_width = self.graphics_view.viewport().width()
+                margin = 20
+
+                # Calculate scale factor to fit width
+                base_dpi = 150
+                zoom = base_dpi / 72
+                rendered_width = page_width * zoom
+
+                if rendered_width > 0:
+                    target_scale = (view_width - margin) / rendered_width
+                    self.scale_factor = max(0.1, min(5.0, target_scale))
+
+            # Initial render: target page +/- 2 pages
+            initial_pages_before = 2
+            initial_pages_after = 2
+
+            start_page = max(1, page_number - initial_pages_before)
+            end_page = min(total_pages, page_number + initial_pages_after)
+
+            # Render initial pages
+            self.render_pages(doc, start_page, end_page, page_number)
+
+            doc.close()
 
         except Exception as e:
             self.result_display.setText(f"Error displaying PDF: {e}")
+
+    def render_pages(self, doc, start_page, end_page, target_page=None):
+        """
+        Render a range of PDF pages and add them to the scene.
+
+        Args:
+            doc: fitz.Document object
+            start_page: First page to render (1-indexed)
+            end_page: Last page to render (1-indexed)
+            target_page: Page to scroll to after rendering (optional)
+        """
+        base_dpi = 150
+        dpi = base_dpi * self.scale_factor
+        zoom = dpi / 72
+        mat = fitz.Matrix(zoom, zoom)
+
+        page_gap = 10 * zoom
+        self.graphics_view.page_gap = page_gap
+
+        # Calculate y_offset (if appending to existing content)
+        if self.graphics_view.last_rendered_page and start_page > self.graphics_view.last_rendered_page:
+            # Appending: start after last rendered page
+            last_page_info = self.graphics_view.rendered_pages.get(self.graphics_view.last_rendered_page)
+            if last_page_info:
+                y_offset = last_page_info[1] + last_page_info[2] + page_gap
+            else:
+                y_offset = 0
+        elif self.graphics_view.first_rendered_page and end_page < self.graphics_view.first_rendered_page:
+            # Prepending: will be handled separately
+            return self.prepend_pages(doc, start_page, end_page)
+        else:
+            # Initial render
+            y_offset = 0
+
+        target_page_y = None
+
+        # Render each page in the range
+        for current_page_num in range(start_page, end_page + 1):
+            # Skip already rendered pages
+            if current_page_num in self.graphics_view.rendered_pages:
+                if target_page and current_page_num == target_page:
+                    target_page_y = self.graphics_view.rendered_pages[current_page_num][1]
+                continue
+
+            page = doc[current_page_num - 1]
+
+            # Apply cropping if enabled
+            if self.crop_pdf_view_checkbox.isChecked():
+                text_blocks = page.get_text("blocks")
+                if text_blocks:
+                    x_min = float('inf')
+                    y_min = float('inf')
+                    x_max = float('-inf')
+                    y_max = float('-inf')
+
+                    for block in text_blocks:
+                        x0, y0, x1, y1 = block[:4]
+                        x_min = min(x_min, x0)
+                        y_min = min(y_min, y0)
+                        x_max = max(x_max, x1)
+                        y_max = max(y_max, y1)
+
+                    crop_box = fitz.Rect(x_min, y_min, x_max, y_max)
+                    media_box = page.mediabox
+
+                    if (crop_box.x0 >= media_box.x0 and crop_box.y0 >= media_box.y0 and
+                        crop_box.x1 <= media_box.x1 and crop_box.y1 <= media_box.y1):
+                        page.set_cropbox(crop_box)
+
+            # Record the Y position of the target page
+            if target_page and current_page_num == target_page:
+                target_page_y = y_offset
+
+            # Render the page
+            pix = page.get_pixmap(matrix=mat)
+            qt_img = QPixmap()
+            qt_img.loadFromData(pix.tobytes("ppm"))
+
+            # Add page to scene at current y_offset
+            pixmap_item = QGraphicsPixmapItem(qt_img)
+            pixmap_item.setPos(0, y_offset)
+            self.graphics_scene.addItem(pixmap_item)
+
+            # Store page info
+            self.graphics_view.rendered_pages[current_page_num] = (pixmap_item, y_offset, qt_img.height())
+
+            # Highlight search terms on this page
+            self.highlight_page_terms(page, y_offset, zoom)
+
+            # Update y_offset for next page
+            y_offset += qt_img.height() + page_gap
+
+        # Update rendered page range
+        if self.graphics_view.first_rendered_page is None or start_page < self.graphics_view.first_rendered_page:
+            self.graphics_view.first_rendered_page = start_page
+        if self.graphics_view.last_rendered_page is None or end_page > self.graphics_view.last_rendered_page:
+            self.graphics_view.last_rendered_page = end_page
+
+        # Update scene rect
+        self.graphics_scene.setSceneRect(self.graphics_scene.itemsBoundingRect())
+
+        # Scroll to target page if specified
+        if target_page_y is not None:
+            self.graphics_view.verticalScrollBar().setValue(int(target_page_y))
+
+    def prepend_pages(self, doc, start_page, end_page):
+        """
+        Prepend pages before the currently rendered content.
+        Maintains scroll position relative to previously rendered content.
+        """
+        base_dpi = 150
+        dpi = base_dpi * self.scale_factor
+        zoom = dpi / 72
+        mat = fitz.Matrix(zoom, zoom)
+        page_gap = self.graphics_view.page_gap
+
+        # Calculate total height of new pages
+        new_content_height = 0
+        pages_to_add = []
+
+        for current_page_num in range(start_page, end_page + 1):
+            if current_page_num in self.graphics_view.rendered_pages:
+                continue
+
+            page = doc[current_page_num - 1]
+
+            # Apply cropping if enabled
+            if self.crop_pdf_view_checkbox.isChecked():
+                text_blocks = page.get_text("blocks")
+                if text_blocks:
+                    x_min = float('inf')
+                    y_min = float('inf')
+                    x_max = float('-inf')
+                    y_max = float('-inf')
+
+                    for block in text_blocks:
+                        x0, y0, x1, y1 = block[:4]
+                        x_min = min(x_min, x0)
+                        y_min = min(y_min, y0)
+                        x_max = max(x_max, x1)
+                        y_max = max(y_max, y1)
+
+                    crop_box = fitz.Rect(x_min, y_min, x_max, y_max)
+                    media_box = page.mediabox
+
+                    if (crop_box.x0 >= media_box.x0 and crop_box.y0 >= media_box.y0 and
+                        crop_box.x1 <= media_box.x1 and crop_box.y1 <= media_box.y1):
+                        page.set_cropbox(crop_box)
+
+            # Render the page
+            pix = page.get_pixmap(matrix=mat)
+            qt_img = QPixmap()
+            qt_img.loadFromData(pix.tobytes("ppm"))
+
+            pages_to_add.append((current_page_num, page, qt_img))
+            new_content_height += qt_img.height() + page_gap
+
+        # Shift existing items down
+        for page_num, (item, old_y, height) in self.graphics_view.rendered_pages.items():
+            new_y = old_y + new_content_height
+            item.setPos(0, new_y)
+            self.graphics_view.rendered_pages[page_num] = (item, new_y, height)
+
+        # Add new pages at the top
+        y_offset = 0
+        for current_page_num, page, qt_img in pages_to_add:
+            pixmap_item = QGraphicsPixmapItem(qt_img)
+            pixmap_item.setPos(0, y_offset)
+            self.graphics_scene.addItem(pixmap_item)
+
+            # Store page info
+            self.graphics_view.rendered_pages[current_page_num] = (pixmap_item, y_offset, qt_img.height())
+
+            # Highlight search terms
+            self.highlight_page_terms(page, y_offset, zoom)
+
+            y_offset += qt_img.height() + page_gap
+
+        # Update rendered page range
+        self.graphics_view.first_rendered_page = start_page
+
+        # Update scene rect
+        self.graphics_scene.setSceneRect(self.graphics_scene.itemsBoundingRect())
+
+        # Adjust scroll position to maintain view
+        vbar = self.graphics_view.verticalScrollBar()
+        vbar.setValue(vbar.value() + int(new_content_height))
+
+    def highlight_page_terms(self, page, y_offset, zoom):
+        """Helper to highlight search terms on a page."""
+        word_positions = page.get_text("words")
+        for word in word_positions:
+            raw_word = word[4].lower()
+            raw_word = remove_accents(raw_word)
+            raw_word = re.sub(r"[^\w]+", "", raw_word)
+
+            if any(nt in raw_word for nt in self.query_terms):
+                rect = QRectF(word[0] * zoom,
+                             word[1] * zoom + y_offset,
+                             (word[2] - word[0]) * zoom,
+                             (word[3] - word[1]) * zoom)
+                highlight = QGraphicsRectItem(rect)
+                highlight.setBrush(QColor(255, 255, 0, 128))
+                self.graphics_scene.addItem(highlight)
+
+    def load_previous_pages(self):
+        """Load pages before the currently rendered range."""
+        if not self.graphics_view.current_pdf_path:
+            return
+
+        try:
+            doc = fitz.open(self.graphics_view.current_pdf_path)
+
+            # Load 3 pages before current range
+            pages_to_load = 3
+            start_page = max(1, self.graphics_view.first_rendered_page - pages_to_load)
+            end_page = self.graphics_view.first_rendered_page - 1
+
+            if start_page <= end_page:
+                self.prepend_pages(doc, start_page, end_page)
+
+            doc.close()
+
+        except Exception as e:
+            print(f"Error loading previous pages: {e}")
+
+    def load_next_pages(self):
+        """Load pages after the currently rendered range."""
+        if not self.graphics_view.current_pdf_path:
+            return
+
+        try:
+            doc = fitz.open(self.graphics_view.current_pdf_path)
+
+            # Load 3 pages after current range
+            pages_to_load = 3
+            start_page = self.graphics_view.last_rendered_page + 1
+            end_page = min(self.graphics_view.total_pages,
+                          self.graphics_view.last_rendered_page + pages_to_load)
+
+            if start_page <= end_page:
+                self.render_pages(doc, start_page, end_page)
+
+            doc.close()
+
+        except Exception as e:
+            print(f"Error loading next pages: {e}")
 
     def on_toggle_crop_pdf_view(self):
         """
@@ -849,7 +1296,7 @@ class SearchApp(QMainWindow):
             return
 
         # ---------------------------------------------------------------------
-        # CASE 2: "Embeddings search"
+        # CASE 2: "Embeddings search" - 使用优化的搜索引擎
         # ---------------------------------------------------------------------
         if search_method == "Embeddings search":
             if not self.embeddings_present:
@@ -857,50 +1304,37 @@ class SearchApp(QMainWindow):
                 self.search_method_combo.setCurrentText("BM25")
                 return
 
-            if not FASTEMBED_AVAILABLE or GLOBAL_EMBED_MODEL is None:
-                self.result_display.setText("FastEmbed library not available. Reverting to BM25 search.")
+            if not self.search_engine or not self.search_engine.embedding_searcher:
+                self.result_display.setText("Embedding searcher not available. Reverting to BM25 search.")
                 self.search_method_combo.setCurrentText("BM25")
                 return
 
-            query_embedding = list(GLOBAL_EMBED_MODEL.query_embed(raw_query))[0]  # shape (dim,)
+            # 使用优化的搜索引擎（查询向量归一化，长度惩罚 0.3，单次排序）
+            self.results = self.search_engine.search(
+                raw_query,
+                method="embedding",
+                max_results=MAX_SEARCH_RESULTS,
+                length_penalty_exp=0.3  # ← 优化：从 0.5 降低到 0.3
+            )
 
-            # Step 1: gather dot-product scores for all docs (ignoring empty pages)
-            doc_scores = []
-            for idx, doc in enumerate(GLOBAL_CORPUS):
-                if 'embedding' not in doc:
-                    continue
-                text = doc.get('text', '')
-                if not text.strip():
-                    # skip empty
-                    continue
+            # 调试日志：显示前5个结果的详细信息
+            if self.results:
+                print("\n🔍 优化后的 Embedding 搜索:")
+                print(f"查询: '{raw_query}'")
+                print(f"总匹配文档数: {len(self.results)}")
+                print(f"长度惩罚: 0.3 (优化后，原为 0.5)")
+                print("\n前 5 个结果:")
+                for i, (idx, score) in enumerate(self.results[:5]):
+                    doc = GLOBAL_CORPUS[idx]
+                    text_preview = doc.get('text', '')[:100].replace('\n', ' ')
+                    text_length = len(doc.get('text', ''))
+                    filename = doc.get('filename', 'unknown')
+                    page = doc.get('page_number', '?')
+                    print(f"  {i+1}. 分数: {score:.4f} | 长度: {text_length:5d} | "
+                          f"{filename} p.{page}")
+                    print(f"     预览: {text_preview}...")
+                print()
 
-                emb = doc['embedding']
-                emb_score = float(np.dot(emb, query_embedding))
-                doc_scores.append((idx, emb_score))
-
-            # Step 2: sort by dot-product descending
-            doc_scores.sort(key=lambda x: x[1], reverse=True)
-
-            # Step 3: truncate to top K
-            top_k = doc_scores[:MAX_SEARCH_RESULTS]
-
-            # Step 4: apply length-penalty to *those* top K and re-sort
-            length_penalty_exponent = 0.5
-            penalized_scores = []
-            for (idx, base_score) in top_k:
-                text = GLOBAL_CORPUS[idx].get('text', '')
-                length = len(text)
-                if length > 0:
-                    final_score = base_score * (length ** length_penalty_exponent)
-                else:
-                    final_score = 0.0
-                penalized_scores.append((idx, final_score))
-
-            # Step 5: sort by the penalized score descending
-            penalized_scores.sort(key=lambda x: x[1], reverse=True)
-
-            # The final ranking is penalized_scores
-            self.results = penalized_scores
             self.current_result_index = 0
 
             if not self.results:
@@ -1125,22 +1559,75 @@ class SearchApp(QMainWindow):
         return highlighted_text
 
     # -------------------------------------------------------------------------
-    # Zoom and font size (unchanged)
+    # Zoom and font size
     # -------------------------------------------------------------------------
     def zoom_in(self):
+        self.graphics_view.auto_fit_width = False  # Disable auto-fit when manually zooming
         self.scale_factor *= 1.2
         if self.graphics_view.current_pdf_path:
             self.display_pdf_page(self.graphics_view.current_pdf_path, self.graphics_view.current_page)
 
     def zoom_out(self):
+        self.graphics_view.auto_fit_width = False  # Disable auto-fit when manually zooming
         self.scale_factor /= 1.2
         if self.graphics_view.current_pdf_path:
             self.display_pdf_page(self.graphics_view.current_pdf_path, self.graphics_view.current_page)
 
     def reset_zoom(self):
-        self.scale_factor = 1.0
-        if self.graphics_view.current_pdf_path:
-            self.display_pdf_page(self.graphics_view.current_pdf_path, self.graphics_view.current_page)
+        self.graphics_view.auto_fit_width = True  # Re-enable auto-fit on reset
+        self.auto_fit_pdf_width()
+
+    def auto_fit_pdf_width(self):
+        """Auto-fit PDF to the width of the graphics view."""
+        if not self.graphics_view.current_pdf_path:
+            return
+
+        try:
+            # Open document to get page dimensions
+            doc = fitz.open(self.graphics_view.current_pdf_path)
+            if len(doc) == 0:
+                doc.close()
+                return
+
+            # Get the current page dimensions
+            page = doc[self.graphics_view.current_page - 1]
+
+            # Apply cropping if enabled to get actual content dimensions
+            if self.crop_pdf_view_checkbox.isChecked():
+                text_blocks = page.get_text("blocks")
+                if text_blocks:
+                    x_min = min(block[0] for block in text_blocks)
+                    x_max = max(block[2] for block in text_blocks)
+                    page_width = x_max - x_min
+                else:
+                    page_width = page.rect.width
+            else:
+                page_width = page.rect.width
+
+            doc.close()
+
+            # Calculate available width (accounting for scrollbar)
+            view_width = self.graphics_view.viewport().width()
+            margin = 20  # Small margin for aesthetics
+
+            # Calculate scale factor to fit width
+            base_dpi = 150
+            zoom = base_dpi / 72
+            rendered_width = page_width * zoom
+
+            if rendered_width > 0:
+                target_scale = (view_width - margin) / rendered_width
+                self.scale_factor = max(0.1, min(5.0, target_scale))  # Clamp between 0.1x and 5x
+            else:
+                self.scale_factor = 1.0
+
+            # Re-render the current page with new scale
+            if self.graphics_view.current_pdf_path:
+                self.display_pdf_page(self.graphics_view.current_pdf_path, self.graphics_view.current_page)
+
+        except Exception as e:
+            print(f"Error auto-fitting PDF width: {e}")
+            self.scale_factor = 1.0
 
     def show_next_chunk(self):
         if not self.results:
@@ -1190,16 +1677,22 @@ class SearchApp(QMainWindow):
 
             # Check if embeddings are present
             self.embeddings_present = any(('embedding' in doc) for doc in GLOBAL_CORPUS)
-            if self.embeddings_present and FASTEMBED_AVAILABLE:
-                if GLOBAL_EMBED_MODEL is None:
-                    self.result_display.append("Initializing embedding model...")
-                    GLOBAL_EMBED_MODEL = TextEmbedding(model_name="nomic-ai/nomic-embed-text-v1")
-                self.result_display.append("Folders updated. Corpus and embeddings loaded.")
-            else:
-                if self.embeddings_present and not FASTEMBED_AVAILABLE:
-                    self.result_display.append("Folders updated. Embeddings found, but fastembed is not installed.")
+            if self.embeddings_present:
+                success = init_embedding_model(lambda msg: self.result_display.append(msg))
+                if success:
+                    # ← added: 重新初始化优化的搜索引擎
+                    self.search_engine = SearchEngine(
+                        corpus=GLOBAL_CORPUS,
+                        bm25_model=GLOBAL_BM25_MODEL,
+                        embed_model=GLOBAL_EMBED_MODEL
+                    )
+                    self.result_display.append("Folders updated. Corpus and embeddings loaded.")
                 else:
-                    self.result_display.append("Folders updated.")
+                    self.search_engine = None
+                    self.result_display.append("Folders updated. Embeddings found, but fastembed is not installed.")
+            else:
+                self.search_engine = None
+                self.result_display.append("Folders updated.")
         else:
             # user canceled => do nothing
             pass
@@ -1209,7 +1702,19 @@ class SearchApp(QMainWindow):
 # Program entry point
 ###############################################################################
 if __name__ == "__main__":
-    app = QApplication([])
+    # 启用输入法支持（修复 Rime 等输入法问题）
+    # 如果环境变量未设置，尝试常见的输入法模块
+    if 'QT_IM_MODULE' not in os.environ:
+        # 检测常见的输入法框架
+        if os.path.exists('/usr/bin/ibus'):
+            os.environ['QT_IM_MODULE'] = 'ibus'
+        elif os.path.exists('/usr/bin/fcitx') or os.path.exists('/usr/bin/fcitx5'):
+            os.environ['QT_IM_MODULE'] = 'fcitx'
+
+    app = QApplication(sys.argv)
+    # 确保应用程序支持输入法
+    app.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+
     window = SearchApp()
     window.resize(1000, 700)  # a bit taller, since it's top/bottom
     window.show()

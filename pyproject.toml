@@ -1,0 +1,62 @@
+[project]
+name = "smart-search-pdfs"
+version = "2.1.0"
+description = "A PDF knowledge base smart search system"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "MrAMS" },
+    { name = "Topping1" }
+]
+
+# Core dependencies - required for basic functionality
+dependencies = [
+    "pymupdf>=1.23.0",           # PDF processing (PyMuPDF)
+    "PyQt5>=5.15.0",             # GUI framework
+    "bm25s>=0.1.0",              # BM25 search algorithm
+    "numpy>=1.24.0",             # Numerical operations
+]
+
+# Optional dependencies for advanced features
+[project.optional-dependencies]
+# Embedding-based search and reranking
+embeddings = [
+    "fastembed>=0.1.0",
+]
+
+# All optional features combined
+full = [
+    "fastembed>=0.1.0",
+]
+
+# Development tools
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/MrAMS/Smart-Search-PDFs"
+Repository = "https://github.com/MrAMS/Smart-Search-PDFs"
+Issues = "https://github.com/MrAMS/Smart-Search-PDFs/issues"
+Original = "https://github.com/Topping1/BM25-PDF-Search"
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "F",  # pyflakes
+    "I",  # isort
+]
+ignore = [
+    "E501",  # line too long (handled by black)
+]
