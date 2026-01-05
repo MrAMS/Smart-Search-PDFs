@@ -8,6 +8,7 @@
 ![Python](https://img.shields.io/badge/python-3.11+-green.svg)
 
 ![screenshot](docs/screenshot.webp)
+![screenshot](docs/screenshot2.webp)
 
 ---
 
