@@ -256,11 +256,164 @@ class SearchEngine:
             raise NotImplementedError("BM25 search not yet implemented in SearchEngine")
 
         elif method == "hybrid":
-            # TODO: 实现混合搜索
-            raise NotImplementedError("Hybrid search not yet implemented")
+            # 混合搜索
+            return self.hybrid_search(query, **kwargs)
 
         else:
             raise ValueError(f"Unknown search method: {method}")
+
+    def hybrid_search(
+        self,
+        query: str,
+        max_results: int = 50,
+        weights: Dict[str, float] = None
+    ) -> List[Tuple[int, float, str]]:
+        """
+        混合搜索：融合文字匹配、Embeddings 和 BM25 结果
+
+        评分策略：
+        - 完全精确匹配：100 分（最高优先级）
+        - 部分精确匹配：80 分
+        - Embeddings 语义：0-70 分（余弦相似度 * 70）
+        - BM25 关键词：0-50 分（归一化分数 * 50）
+
+        Args:
+            query: 查询文本
+            max_results: 返回的最大结果数
+            weights: 自定义权重 {"exact": 100, "embedding": 70, "bm25": 50}
+
+        Returns:
+            [(doc_idx, final_score, match_tags), ...]
+            match_tags: "精确匹配,语义相关" 等
+        """
+        if weights is None:
+            weights = {
+                "exact_full": 100.0,     # 完全精确匹配
+                "exact_partial": 80.0,   # 部分精确匹配
+                "embedding": 70.0,       # Embeddings 语义
+                "bm25": 50.0             # BM25 关键词
+            }
+
+        # 存储每个文档的得分和匹配类型
+        doc_scores = {}  # {doc_idx: {"score": float, "tags": set()}}
+
+        query_lower = query.lower().strip()
+        query_terms = query_lower.split()
+
+        # ================================================================
+        # 阶段 1: 精确文字匹配（最高优先级）
+        # ================================================================
+        for idx, doc in enumerate(self.corpus):
+            text = doc.get('text', '').lower()
+
+            # 完全精确匹配
+            if query_lower in text:
+                if idx not in doc_scores:
+                    doc_scores[idx] = {"score": 0.0, "tags": set()}
+
+                # 计算匹配质量（考虑匹配位置和频率）
+                match_count = text.count(query_lower)
+                match_quality = min(match_count * 10, 20)  # 最多额外加20分
+
+                doc_scores[idx]["score"] = max(
+                    doc_scores[idx]["score"],
+                    weights["exact_full"] + match_quality
+                )
+                doc_scores[idx]["tags"].add("精确匹配")
+
+            # 部分精确匹配（所有查询词都出现）
+            elif len(query_terms) > 1 and all(term in text for term in query_terms):
+                if idx not in doc_scores:
+                    doc_scores[idx] = {"score": 0.0, "tags": set()}
+
+                doc_scores[idx]["score"] = max(
+                    doc_scores[idx]["score"],
+                    weights["exact_partial"]
+                )
+                doc_scores[idx]["tags"].add("部分匹配")
+
+        # ================================================================
+        # 阶段 2: Embeddings 语义搜索
+        # ================================================================
+        if self.embedding_searcher is not None:
+            try:
+                embedding_results = self.embedding_searcher.search(
+                    query,
+                    self.corpus,
+                    max_results=max_results * 2,  # 获取更多候选
+                    length_penalty_exp=0.3,
+                    return_details=True
+                )
+
+                for idx, final_score, cosine_sim, length in embedding_results:
+                    if idx not in doc_scores:
+                        doc_scores[idx] = {"score": 0.0, "tags": set()}
+
+                    # Embeddings 分数：余弦相似度 * 权重
+                    embedding_score = cosine_sim * weights["embedding"]
+
+                    # 如果已有精确匹配分数，叠加语义分数的一部分
+                    if doc_scores[idx]["score"] >= weights["exact_partial"]:
+                        doc_scores[idx]["score"] += embedding_score * 0.3
+                    else:
+                        doc_scores[idx]["score"] = max(
+                            doc_scores[idx]["score"],
+                            embedding_score
+                        )
+
+                    doc_scores[idx]["tags"].add("语义相关")
+            except Exception as e:
+                print(f"Warning: Embedding search failed: {e}")
+
+        # ================================================================
+        # 阶段 3: BM25 关键词搜索
+        # ================================================================
+        if self.bm25_model is not None:
+            try:
+                import bm25s
+                tokenized_query = bm25s.tokenize(query, stopwords="en")
+                results, scores = self.bm25_model.retrieve(
+                    tokenized_query,
+                    k=min(len(self.corpus), max_results * 2)
+                )
+
+                # 归一化 BM25 分数
+                max_bm25_score = max(scores[0]) if len(scores[0]) > 0 else 1.0
+
+                for i, doc_idx in enumerate(results[0]):
+                    if doc_idx not in doc_scores:
+                        doc_scores[doc_idx] = {"score": 0.0, "tags": set()}
+
+                    # BM25 分数归一化
+                    normalized_bm25 = scores[0][i] / max_bm25_score if max_bm25_score > 0 else 0
+                    bm25_score = normalized_bm25 * weights["bm25"]
+
+                    # 如果已有高分，叠加 BM25 分数的一部分
+                    if doc_scores[doc_idx]["score"] >= weights["exact_partial"]:
+                        doc_scores[doc_idx]["score"] += bm25_score * 0.2
+                    else:
+                        doc_scores[doc_idx]["score"] = max(
+                            doc_scores[doc_idx]["score"],
+                            bm25_score
+                        )
+
+                    doc_scores[doc_idx]["tags"].add("关键词")
+            except Exception as e:
+                print(f"Warning: BM25 search failed: {e}")
+
+        # ================================================================
+        # 排序和返回结果
+        # ================================================================
+        # 转换为列表并排序
+        results = [
+            (idx, info["score"], ",".join(sorted(info["tags"])))
+            for idx, info in doc_scores.items()
+        ]
+
+        # 按分数降序排序
+        results.sort(key=lambda x: x[1], reverse=True)
+
+        return results[:max_results]
 
     def get_stats(self) -> Dict[str, Any]:
         """

@@ -776,35 +776,87 @@ class SearchApp(QMainWindow):
         # Row for "Search method" and "Reranking method"
         top_row_layout = QHBoxLayout()
 
-        self.search_method_label = QLabel("Search method:")
+        self.search_method_label = QLabel("搜索方法:")
+        self.search_method_label.setStyleSheet("font-weight: bold; color: #495057;")
         self.search_method_combo = QComboBox()
-        self.search_method_combo.addItem("Embeddings search")      # ← 默认首选
-        self.search_method_combo.addItem("BM25")
-        self.search_method_combo.addItem("BM25 substring")
-        self.search_method_combo.addItem("Simple text search")
+        self.search_method_combo.addItem("混合搜索 (智能)")
+        self.search_method_combo.addItem("语义搜索 (Embeddings)")
+        self.search_method_combo.addItem("BM25 关键词")
+        self.search_method_combo.addItem("BM25 前缀匹配")
+        self.search_method_combo.addItem("精确文本搜索")
+
+        # 设置工具提示
+        self.search_method_combo.setItemData(0, "融合精确匹配、语义理解和关键词检索，智能排序（推荐）", Qt.ToolTipRole)
+        self.search_method_combo.setItemData(1, "基于深度学习的语义理解，适合同义词和概念性查询", Qt.ToolTipRole)
+        self.search_method_combo.setItemData(2, "经典关键词搜索，快速精准", Qt.ToolTipRole)
+        self.search_method_combo.setItemData(3, "支持前缀匹配和负向排除（如：compar -comparison）", Qt.ToolTipRole)
+        self.search_method_combo.setItemData(4, "精确短语匹配，支持引号", Qt.ToolTipRole)
+
+        self.search_method_combo.setStyleSheet("""
+            QComboBox {
+                padding: 5px;
+                border: 2px solid #dee2e6;
+                border-radius: 4px;
+                background: white;
+            }
+            QComboBox:hover {
+                border-color: #007bff;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+        """)
         self.search_method_combo.currentIndexChanged.connect(self.update_rerank_combo_status)
 
         top_row_layout.addWidget(self.search_method_label)
-        top_row_layout.addWidget(self.search_method_combo)
+        top_row_layout.addWidget(self.search_method_combo, 1)
+        top_row_layout.addSpacing(20)
 
-        self.rerank_label = QLabel("Reranking method:")
+        self.rerank_label = QLabel("重排序:")
+        self.rerank_label.setStyleSheet("font-weight: bold; color: #495057;")
         self.rerank_combo = QComboBox()
-        self.rerank_combo.addItem("No reranking")
-        self.rerank_combo.addItem("Minimal span-based scoring")
-        self.rerank_combo.addItem("Exact text search")
-        self.rerank_combo.addItem("Embeddings rerank")
+        self.rerank_combo.addItem("无重排序")
+        self.rerank_combo.addItem("最小跨度评分")
+        self.rerank_combo.addItem("精确文本匹配")
+        self.rerank_combo.addItem("Embedding 重排序")
         self.rerank_combo.setEditable(False)
+        self.rerank_combo.setStyleSheet("""
+            QComboBox {
+                padding: 5px;
+                border: 2px solid #dee2e6;
+                border-radius: 4px;
+                background: white;
+            }
+            QComboBox:hover {
+                border-color: #007bff;
+            }
+        """)
         self.rerank_combo.currentIndexChanged.connect(self.search)
 
         top_row_layout.addWidget(self.rerank_label)
-        top_row_layout.addWidget(self.rerank_combo)
+        top_row_layout.addWidget(self.rerank_combo, 1)
 
         top_layout.addLayout(top_row_layout)
 
         # Search label/input
-        self.query_label = QLabel("Search query:")
+        self.query_label = QLabel("搜索查询:")
+        self.query_label.setStyleSheet("font-weight: bold; color: #495057;")
         self.query_input = QLineEdit()
         self.query_input.setFont(QFont("Arial", self.font_size))
+        self.query_input.setPlaceholderText("输入搜索关键词或短语...")
+        self.query_input.setStyleSheet("""
+            QLineEdit {
+                padding: 8px;
+                border: 2px solid #dee2e6;
+                border-radius: 4px;
+                background: white;
+                font-size: 14px;
+            }
+            QLineEdit:focus {
+                border-color: #007bff;
+                background: #f8f9fa;
+            }
+        """)
         # 启用输入法支持（修复 Rime 等输入法无法输入的问题）
         self.query_input.setAttribute(Qt.WA_InputMethodEnabled, True)
         self.query_input.returnPressed.connect(self.search)
@@ -813,26 +865,73 @@ class SearchApp(QMainWindow):
 
         # Navigation buttons
         button_layout = QHBoxLayout()
-        self.prev_button = QPushButton("<--")
-        self.next_button = QPushButton("-->")
+
+        # 结果导航按钮
+        self.prev_button = QPushButton("◀ 上一个")
+        self.next_button = QPushButton("下一个 ▶")
+        self.prev_button.setToolTip("显示上一个搜索结果 (Alt+Left)")
+        self.next_button.setToolTip("显示下一个搜索结果 (Alt+Right)")
         self.prev_button.clicked.connect(self.show_previous_chunk)
         self.next_button.clicked.connect(self.show_next_chunk)
+
+        # 设置按钮样式
+        button_style = """
+            QPushButton {
+                background-color: #007bff;
+                color: white;
+                border: none;
+                padding: 6px 12px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #0056b3;
+            }
+            QPushButton:pressed {
+                background-color: #004085;
+            }
+        """
+        self.prev_button.setStyleSheet(button_style)
+        self.next_button.setStyleSheet(button_style)
+
         button_layout.addWidget(self.prev_button)
         button_layout.addWidget(self.next_button)
+        button_layout.addSpacing(20)
 
-        self.decrease_font_button = QPushButton("-")
+        # 字体大小按钮
+        self.decrease_font_button = QPushButton("A-")
+        self.increase_font_button = QPushButton("A+")
+        self.decrease_font_button.setToolTip("减小字体")
+        self.increase_font_button.setToolTip("增大字体")
         self.decrease_font_button.clicked.connect(self.decrease_font_size)
-        button_layout.addWidget(self.decrease_font_button)
-
-        self.increase_font_button = QPushButton("+")
         self.increase_font_button.clicked.connect(self.increase_font_size)
+
+        font_button_style = """
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                border: none;
+                padding: 6px 12px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #545b62;
+            }
+        """
+        self.decrease_font_button.setStyleSheet(font_button_style)
+        self.increase_font_button.setStyleSheet(font_button_style)
+
+        button_layout.addWidget(self.decrease_font_button)
         button_layout.addWidget(self.increase_font_button)
-        
-        # --- New checkbox for toggling PDF cropping ---
-        self.crop_pdf_view_checkbox = QCheckBox("Crop PDF view")
+        button_layout.addSpacing(20)
+
+        # --- PDF 裁剪复选框 ---
+        self.crop_pdf_view_checkbox = QCheckBox("裁剪 PDF 白边")
         self.crop_pdf_view_checkbox.setChecked(True)
+        self.crop_pdf_view_checkbox.setToolTip("自动裁剪 PDF 页面的空白边距")
         self.crop_pdf_view_checkbox.toggled.connect(self.on_toggle_crop_pdf_view)
         button_layout.addWidget(self.crop_pdf_view_checkbox)
+        button_layout.addStretch()  # 添加弹性空间，使按钮靠左对齐
         # -------------------------------------------------
 
         top_layout.addLayout(button_layout)
@@ -893,8 +992,8 @@ class SearchApp(QMainWindow):
 
     def update_rerank_combo_status(self):
         current_method = self.search_method_combo.currentText()
-        # Disable rerank for simple, embeddings, and substring methods
-        if current_method in ("Simple text search", "Embeddings search", "BM25 substring"):
+        # Disable rerank for simple, embeddings, hybrid and substring methods
+        if current_method in ("精确文本搜索", "语义搜索 (Embeddings)", "BM25 前缀匹配", "混合搜索 (智能)"):
             self.rerank_combo.setEnabled(False)
         else:
             self.rerank_combo.setEnabled(True)
@@ -1267,9 +1366,66 @@ class SearchApp(QMainWindow):
         method = self.rerank_combo.currentText()
 
         # ---------------------------------------------------------------------
+        # CASE 0: "Hybrid Search (Smart)" - 智能混合搜索
+        # ---------------------------------------------------------------------
+        if search_method == "混合搜索 (智能)":
+            if not self.search_engine:
+                self.result_display.setText("Search engine not available.")
+                return
+
+            # 使用混合搜索
+            try:
+                hybrid_results = self.search_engine.search(
+                    raw_query,
+                    method="hybrid",
+                    max_results=MAX_SEARCH_RESULTS
+                )
+
+                # hybrid_results 格式: [(idx, score, tags), ...]
+                # 转换为标准格式并保存匹配标签
+                self.results = []
+                self.match_tags = {}  # 存储每个结果的匹配标签
+
+                for idx, score, tags in hybrid_results:
+                    self.results.append((idx, score))
+                    self.match_tags[idx] = tags
+
+                # 调试日志
+                if self.results:
+                    print("\n🎯 混合搜索结果:")
+                    print(f"查询: '{raw_query}'")
+                    print(f"总匹配文档数: {len(self.results)}")
+                    print("\n前 5 个结果:")
+                    for i, (idx, score) in enumerate(self.results[:5]):
+                        doc = GLOBAL_CORPUS[idx]
+                        text_preview = doc.get('text', '')[:80].replace('\n', ' ')
+                        filename = doc.get('filename', 'unknown')
+                        page = doc.get('page_number', '?')
+                        tags = self.match_tags.get(idx, '')
+                        print(f"  {i+1}. 分数: {score:.2f} | 标签: [{tags}] | "
+                              f"{filename} p.{page}")
+                        print(f"     预览: {text_preview}...")
+                    print()
+
+                self.current_result_index = 0
+
+                if not self.results:
+                    self.result_display.setText("No results found.")
+                else:
+                    self.show_current_chunk()
+                self.status_bar.clearMessage()
+                return
+
+            except Exception as e:
+                self.result_display.setText(f"Hybrid search error: {e}")
+                import traceback
+                traceback.print_exc()
+                return
+
+        # ---------------------------------------------------------------------
         # CASE 1: "Simple text search"
         # ---------------------------------------------------------------------
-        if search_method == "Simple text search":
+        if search_method == "精确文本搜索":
             quoted_phrases, unquoted_words = parse_simple_search_query(raw_query)
 
             quoted_phrases_norm = [remove_accents(p.lower()) for p in quoted_phrases]
@@ -1298,15 +1454,15 @@ class SearchApp(QMainWindow):
         # ---------------------------------------------------------------------
         # CASE 2: "Embeddings search" - 使用优化的搜索引擎
         # ---------------------------------------------------------------------
-        if search_method == "Embeddings search":
+        if search_method == "语义搜索 (Embeddings)":
             if not self.embeddings_present:
                 self.result_display.setText("No .emb files found. Reverting to BM25 search.")
-                self.search_method_combo.setCurrentText("BM25")
+                self.search_method_combo.setCurrentText("BM25 关键词")
                 return
 
             if not self.search_engine or not self.search_engine.embedding_searcher:
                 self.result_display.setText("Embedding searcher not available. Reverting to BM25 search.")
-                self.search_method_combo.setCurrentText("BM25")
+                self.search_method_combo.setCurrentText("BM25 关键词")
                 return
 
             # 使用优化的搜索引擎（查询向量归一化，长度惩罚 0.3，单次排序）
@@ -1347,7 +1503,7 @@ class SearchApp(QMainWindow):
         # ---------------------------------------------------------------------
         # CASE 3: "BM25 substring"
         # ---------------------------------------------------------------------
-        if search_method == "BM25 substring":
+        if search_method == "BM25 前缀匹配":
             # Parse positive & negative keywords
             raw_terms = raw_query.split()
             positive_keywords = []
@@ -1527,11 +1683,41 @@ class SearchApp(QMainWindow):
         text_to_display = chunk_data.get('text', "")
         highlighted_chunk = self.highlight_query_terms(text_to_display)
 
+        # Get match tags if available (for hybrid search)
+        match_tags_html = ""
+        if hasattr(self, 'match_tags') and doc_id in self.match_tags:
+            tags = self.match_tags[doc_id]
+            # 为不同的匹配类型添加彩色标签
+            tag_colors = {
+                "精确匹配": "#28a745",  # 绿色 - 最高优先级
+                "部分匹配": "#007bff",  # 蓝色
+                "语义相关": "#6f42c1",  # 紫色
+                "关键词": "#fd7e14"     # 橙色
+            }
+            tag_badges = []
+            for tag in tags.split(','):
+                tag = tag.strip()
+                color = tag_colors.get(tag, "#6c757d")  # 默认灰色
+                tag_badges.append(
+                    f'<span style="background-color: {color}; color: white; '
+                    f'padding: 2px 8px; border-radius: 3px; margin-right: 5px; '
+                    f'font-size: 11px; font-weight: bold;">{tag}</span>'
+                )
+            match_tags_html = f"<b>匹配方式:</b> {''.join(tag_badges)}<br>"
+
         self.result_display.setHtml(
-            f"<b>Result {self.current_result_index + 1} of {len(self.results)}</b><br>"
-            f"<b>Filename:</b> {chunk_data.get('filename','')}<br>"
-            f"<b>Page Number:</b> {chunk_data.get('page_number','')}<br>"
-            f"<b>Score:</b> {score:.4f}<br><br>{highlighted_chunk}"
+            f'<div style="font-family: Arial, sans-serif;">'
+            f'<div style="background-color: #f8f9fa; padding: 10px; border-radius: 5px; margin-bottom: 10px;">'
+            f'<b style="color: #495057;">结果 {self.current_result_index + 1} / {len(self.results)}</b><br>'
+            f'<b style="color: #495057;">文件:</b> <span style="color: #212529;">{os.path.basename(chunk_data.get("filename",""))}</span><br>'
+            f'<b style="color: #495057;">页码:</b> <span style="color: #212529;">{chunk_data.get("page_number","")}</span><br>'
+            f'{match_tags_html}'
+            f'<b style="color: #495057;">相关度:</b> <span style="color: #007bff; font-weight: bold;">{score:.4f}</span>'
+            f'</div>'
+            f'<div style="padding: 10px; background-color: white; border-left: 3px solid #007bff;">'
+            f'{highlighted_chunk}'
+            f'</div>'
+            f'</div>'
         )
 
         pdf_path = chunk_data.get('filename','')
@@ -1546,14 +1732,11 @@ class SearchApp(QMainWindow):
         highlighted_text = normalized_text
         for term in self.query_terms:
             escaped_term = re.escape(term)
-            #highlighted_text = re.sub(
-            #    rf'(?i)\b({escaped_term})\b',
-            #    r'<span style="background-color: yellow;">\1</span>',
-            #    highlighted_text,
-            #)
+            # 使用更醒目的高亮颜色和样式
             highlighted_text = re.sub(
                 rf'(?i)({escaped_term})',
-                r'<span style="background-color: yellow;">\1</span>',
+                r'<span style="background-color: #ffeb3b; color: #000; font-weight: bold; '
+                r'padding: 1px 2px; border-radius: 2px;">\1</span>',
                 highlighted_text,
             )
         return highlighted_text
