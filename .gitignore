@@ -56,9 +56,6 @@ coverage.xml
 # pyenv
 .python-version
 
-# UV (Python package manager)
-uv.lock
-
 # IDE
 .vscode/
 .idea/
