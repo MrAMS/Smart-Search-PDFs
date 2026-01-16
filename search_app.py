@@ -140,7 +140,7 @@ def init_embedding_model(log_callback=None):
 
 def load_folders_database():
     """
-    Attempts to load 'folders.ini'. 
+    Attempts to load 'folders.ini'.
     If it doesn't exist, returns None => "not initialized".
     If it exists but is invalid or empty, returns empty list => valid but no data.
     Otherwise, returns the list.
@@ -176,7 +176,7 @@ def load_corpus_and_initialize_bm25(folders_list):
     Given a list of folder entries (each with {checked, path, description}),
     load all .json (and matching .emb) from the *checked* folders into GLOBAL_CORPUS,
     and build a BM25 index.
-    
+
     If a folder does not exist, we store "Folder xxxxxx not found" in error_messages.
     Returns (error_messages, status_message).
     """
@@ -198,7 +198,7 @@ def load_corpus_and_initialize_bm25(folders_list):
             continue
 
         json_files_in_folder = [
-            os.path.join(folder_path, f) for f in os.listdir(folder_path) 
+            os.path.join(folder_path, f) for f in os.listdir(folder_path)
             if f.endswith(".json")
         ]
         all_json_files.extend(json_files_in_folder)
@@ -1882,7 +1882,7 @@ class SearchApp(QMainWindow):
             N = len(GLOBAL_CORPUS)
             doc_term_freqs = []
             doc_lengths = []
-            for doc in GLOBAL_CORPUS:	
+            for doc in GLOBAL_CORPUS:
                 text = doc.get('text', '')
                 norm_text = remove_accents(text.lower())
                 terms = norm_text.split()
@@ -2257,9 +2257,31 @@ if __name__ == "__main__":
         elif os.path.exists('/usr/bin/fcitx') or os.path.exists('/usr/bin/fcitx5'):
             os.environ['QT_IM_MODULE'] = 'fcitx'
 
+    # 启用高DPI缩放支持（必须在创建QApplication之前设置）
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+
+    # 设置缩放策略
+    if hasattr(Qt, 'AA_Use96Dpi'):
+        QApplication.setAttribute(Qt.AA_Use96Dpi, False)
+
     app = QApplication(sys.argv)
-    # 确保应用程序支持输入法
-    app.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+
+    # 获取屏幕DPI并设置合适的字体大小
+    screen = app.primaryScreen()
+    dpi = screen.logicalDotsPerInch()
+    base_font_size = 10
+
+    # 根据DPI调整字体大小
+    if dpi > 96:
+        scale_factor = dpi / 96.0
+        adjusted_font_size = int(base_font_size * scale_factor)
+    else:
+        adjusted_font_size = base_font_size
+
+    font = app.font()
+    font.setPointSize(adjusted_font_size)
+    app.setFont(font)
 
     window = SearchApp()
     window.resize(1000, 700)  # a bit taller, since it's top/bottom

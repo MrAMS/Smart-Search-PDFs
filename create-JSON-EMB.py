@@ -959,7 +959,32 @@ class MainWindow(QtWidgets.QMainWindow):
 ##########################################
 
 def main():
+    # 启用高DPI缩放支持（必须在创建QApplication之前设置）
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+
+    # 设置缩放策略
+    if hasattr(QtCore.Qt, 'AA_Use96Dpi'):
+        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_Use96Dpi, False)
+
     app = QtWidgets.QApplication(sys.argv)
+
+    # 获取屏幕DPI并设置合适的字体大小
+    screen = app.primaryScreen()
+    dpi = screen.logicalDotsPerInch()
+    base_font_size = 10
+
+    # 根据DPI调整字体大小
+    if dpi > 96:
+        scale_factor = dpi / 96.0
+        adjusted_font_size = int(base_font_size * scale_factor)
+    else:
+        adjusted_font_size = base_font_size
+
+    font = app.font()
+    font.setPointSize(adjusted_font_size)
+    app.setFont(font)
+
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())
