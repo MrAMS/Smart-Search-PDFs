@@ -16,6 +16,8 @@ dependencies = [
     "PyQt5>=5.15.0",             # GUI framework
     "bm25s>=0.1.0",              # BM25 search algorithm
     "numpy>=1.24.0",             # Numerical operations
+    "pymupdf4llm>=0.2.9",
+    "fastembed>=0.7.4",
 ]
 
 # Optional dependencies for advanced features

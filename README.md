@@ -56,6 +56,9 @@ uv sync
 ### 处理 PDF 文件
 
 ```bash
+# 国内设置一下抱抱脸(HF)的镜像，下载模型会更快（可选）
+export HF_ENDPOINT=https://hf-mirror.com
+
 # 启动 GUI 工具（处理 + 搜索）
 ./run.sh
 
